@@ -5,6 +5,8 @@ import io.hydrosphere.mist.api._
 import io.hydrosphere.mist.jobs.JobDetails.Source
 import io.hydrosphere.mist.jobs._
 import io.hydrosphere.mist.master.MasterService
+import io.hydrosphere.mist.master.interfaces.JsonCodecs
+import io.hydrosphere.mist.master.models.{RunSettings, EndpointStartRequest}
 import io.hydrosphere.mist.utils.Logger
 import io.hydrosphere.mist.utils.TypeAlias.JobParameters
 
@@ -21,51 +23,51 @@ class HttpApi(master: MasterService) extends Logger {
 
   val route: Route = {
     path("internal" / "jobs") {
-      get { complete (master.activeJobs())}
+      get { complete (master.jobService.activeJobs())}
     } ~
     path("internal" / "jobs" / Segment / Segment) { (namespace, jobId) =>
       delete {
-        completeU { master.stopJob(namespace, jobId) }
+        completeU { master.jobService.stopJob(jobId).map(_ => ()) }
       }
     } ~
     path("internal" / "workers" ) {
-      get { complete(master.workers()) }
+      get { complete(master.jobService.workers()) }
     } ~
     path("internal" / "workers") {
       delete { completeU {
-        master.stopAllWorkers()
+        master.jobService.stopAllWorkers()
       }}
     } ~
     path("internal" / "workers" / Segment) { workerId =>
       delete {
         complete {
-          master.stopWorker(workerId).map(_ => Map("id" -> workerId ))
+          master.jobService.stopWorker(workerId).map(_ => Map("id" -> workerId ))
         }
       }
     } ~
     path("internal" / "routers") {
       get {
         complete {
-          val result = master.listRoutesInfo()
-           .map(i => i.definition.name -> toHttpRouteInfo(i))
-           .toMap
+          val result = master.endpointsInfo
+           .map(seq => seq.map(i => i.config.name -> HttpJobInfo.convert(i)).toMap)
           result
         }
       }
     } ~
-    path("api" / Segment) { jobId =>
-      post { parameters('train.?, 'serve.?) { (train, serve) =>
+    path("api" / Segment) { routeId =>
+      post { parameters('serve.?) { (serve) =>
         entity(as[JobParameters]) { jobParams =>
 
           complete {
-            val action = if (train.isDefined)
-              Action.Train
-            else if (serve.isDefined)
-              Action.Serve
-            else
-              Action.Execute
+            val action = if (serve.isDefined) Action.Serve else Action.Execute
 
-            master.startJob(jobId, action, jobParams, Source.Http, None)
+            val request = EndpointStartRequest(
+              endpointId = routeId,
+              parameters = jobParams,
+              externalId = None,
+              runSettings = RunSettings.Default
+            )
+            master.forceJobRun(request, Source.Http, action)
           }
         }
       }}
@@ -76,21 +78,4 @@ class HttpApi(master: MasterService) extends Logger {
   def completeU(resource: Future[Unit]): Route =
     onSuccess(resource) { complete(200, None) }
 
-  private def toHttpRouteInfo(info: JobInfo): HttpJobInfo = info match {
-    case py: PyJobInfo => HttpJobInfo.forPython()
-    case jvm: JvmJobInfo =>
-      val inst = jvm.jobClass
-      val classes = inst.supportedClasses()
-      HttpJobInfo(
-        execute = inst.execute.map(i => i.argumentsTypes.mapValues(HttpJobArg.convert)),
-        train = inst.train.map(i => i.argumentsTypes.mapValues(HttpJobArg.convert)),
-        serve = inst.serve.map(i => i.argumentsTypes.mapValues(HttpJobArg.convert)),
-
-        isHiveJob = classes.contains(classOf[HiveSupport]),
-        isSqlJob = classes.contains(classOf[SQLSupport]),
-        isStreamingJob = classes.contains(classOf[StreamingSupport]),
-        isMLJob = classes.contains(classOf[MLMistJob])
-      )
-
-  }
 }

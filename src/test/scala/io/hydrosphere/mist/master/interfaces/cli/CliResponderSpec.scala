@@ -2,14 +2,17 @@ package io.hydrosphere.mist.master.interfaces.cli
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
+import io.hydrosphere.mist.Messages.JobMessages.JobParams
 import io.hydrosphere.mist.Messages.ListRoutes
 import io.hydrosphere.mist.Messages.StatusMessages.RunningJobs
 import io.hydrosphere.mist.Messages.WorkerMessages.StopAllWorkers
 import io.hydrosphere.mist.jobs.JobDetails.Source
-import io.hydrosphere.mist.jobs.{JobDefinition, JobDetails, JobExecutionParams}
-import io.hydrosphere.mist.master.{JobRoutes, MasterService}
-import org.scalatest.{FunSpecLike, Matchers}
+import io.hydrosphere.mist.jobs.jar.JobsLoader
+import io.hydrosphere.mist.jobs.{Action, JobDetails, JvmJobInfo, PyJobInfo}
+import io.hydrosphere.mist.master.{JobService, MasterService}
+import io.hydrosphere.mist.master.models.{EndpointConfig, FullEndpointInfo}
 import org.mockito.Mockito._
+import org.scalatest.{FunSpecLike, Matchers}
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -19,13 +22,15 @@ class CliResponderSpec extends TestKit(ActorSystem("cliResponderTest"))
   with Matchers {
 
   it("should return routes list") {
-    val master = mock(classOf[MasterService])
-    when(master.routeDefinitions())
-      .thenReturn(Seq(
-        JobDefinition("first", "jar.jar", "MyClass", "namespace"),
-        JobDefinition("second", "py.py", "MyClass", "namespace")
-      ))
+    val epConfig = EndpointConfig("name", "path", "className", "context")
+    val scalaJobClass = io.hydrosphere.mist.jobs.jar.MultiplyJob.getClass
+    val infos = Seq(
+      PyJobInfo,
+      JvmJobInfo(JobsLoader.Common.loadJobClass(scalaJobClass.getName).get)
+    ).map(i => FullEndpointInfo(epConfig, i))
 
+    val master = mock(classOf[MasterService])
+    when(master.endpointsInfo).thenReturn(Future.successful(infos))
 
     val responder = system.actorOf(CliResponder.props(master, TestProbe().ref))
 
@@ -33,20 +38,27 @@ class CliResponderSpec extends TestKit(ActorSystem("cliResponderTest"))
     probe.send(responder, ListRoutes)
 
     val msg = probe.receiveOne(1.second)
-    val definitions = msg.asInstanceOf[List[JobDefinition]]
+    val definitions = msg.asInstanceOf[Seq[FullEndpointInfo]]
     definitions.size shouldBe 2
   }
 
   it("should return running jobs") {
     val master = mock(classOf[MasterService])
-    when(master.activeJobs())
+    val jobService = mock(classOf[JobService])
+    when(jobService.activeJobs())
       .thenReturn(Future.successful(List(
         JobDetails(
-          configuration = JobExecutionParams("path", "MyClass", "namespace", Map.empty, None, None),
-          source = Source.Http
+          params = JobParams("path", "className", Map.empty, Action.Execute),
+          jobId = "id",
+          source = Source.Http,
+          endpoint = "endpoint",
+          context = "context",
+          externalId = None,
+          workerId = "workerId"
         )
-      )))
+    )))
 
+    when(master.jobService).thenReturn(jobService)
 
     val responder = system.actorOf(CliResponder.props(master, TestProbe().ref))
 
@@ -54,7 +66,7 @@ class CliResponderSpec extends TestKit(ActorSystem("cliResponderTest"))
     probe.send(responder, RunningJobs)
 
     val msg = probe.receiveOne(1.second)
-    val definitions = msg.asInstanceOf[List[JobDetails]]
+    val definitions = msg.asInstanceOf[Seq[JobDetails]]
     definitions.size shouldBe 1
   }
 

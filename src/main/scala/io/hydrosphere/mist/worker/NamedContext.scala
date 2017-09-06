@@ -2,8 +2,7 @@ package io.hydrosphere.mist.worker
 
 import java.io.File
 
-import io.hydrosphere.mist.MistConfig
-import io.hydrosphere.mist.api.SetupConfiguration
+import io.hydrosphere.mist.api.{CentralLoggingConf, RuntimeJobInfo, SetupConfiguration}
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.hive.HiveContext
@@ -13,11 +12,10 @@ import org.apache.spark.{SparkConf, SparkContext}
 import scala.collection.mutable
 
 class NamedContext(
-  val context: SparkContext,
-  namespace: String,
-  streamingDuration: Duration,
-  publisherConnectionString: String,
-  publisherTopic: String
+  val sparkContext: SparkContext,
+  val namespace: String,
+  streamingDuration: Duration = Duration(40 * 1000),
+  loggingConf: Option[CentralLoggingConf] = None
 ) {
 
   private val jars = mutable.Buffer.empty[String]
@@ -25,79 +23,36 @@ class NamedContext(
   def addJar(jarPath: String): Unit = {
     val jarAbsolutePath = new File(jarPath).getAbsolutePath
     if (!jars.contains(jarAbsolutePath)) {
-      context.addJar(jarPath)
+      sparkContext.addJar(jarPath)
       jars += jarAbsolutePath
     }
   }
 
-  def setupConfiguration: SetupConfiguration = {
+  def setupConfiguration(jobId: String): SetupConfiguration = {
     SetupConfiguration(
-      context = context,
+      context = sparkContext,
       streamingDuration = streamingDuration,
-      publisherConnectionString = publisherConnectionString,
-      publisherTopic = publisherTopic
+      info = RuntimeJobInfo(jobId, namespace),
+      loggingConf = loggingConf
     )
   }
 
   //TODO: can we call that inside python directly using setupConfiguration?
   // python support
-  def sparkConf: SparkConf = context.getConf
+  def sparkConf: SparkConf = sparkContext.getConf
 
   // python support
-  def javaContext: JavaSparkContext = new JavaSparkContext(context)
+  def javaContext: JavaSparkContext = new JavaSparkContext(sparkContext)
 
   // python support
-  def sqlContext: SQLContext = new SQLContext(context)
+  def sqlContext: SQLContext = new SQLContext(sparkContext)
 
   // python support
-  def hiveContext: HiveContext = new HiveContext(context)
+  def hiveContext: HiveContext = new HiveContext(sparkContext)
 
   def stop(): Unit = {
-    context.stop()
+    sparkContext.stop()
   }
 
 }
 
-object NamedContext {
-
-  def apply(namespace: String): NamedContext = {
-    val sparkConf = new SparkConf()
-      .setAppName(namespace)
-      .set("spark.driver.allowMultipleContexts", "true")
-
-    val sparkConfSettings = MistConfig.Contexts.sparkConf(namespace)
-
-    for (keyValue: List[String] <- sparkConfSettings) {
-      sparkConf.set(keyValue.head, keyValue(1))
-    }
-    NamedContext(namespace, sparkConf)
-  }
-
-  def apply(namespace: String, sparkConf: SparkConf): NamedContext = {
-    val duration = MistConfig.Contexts.streamingDuration(namespace)
-    //TODO: if there is no global publisher configuration??
-    val publisherConf = globalPublisherConfiguration()
-    val publisherTopic = globalPublisherTopic()
-
-    val context = new SparkContext(sparkConf)
-    new NamedContext(context, namespace, duration, publisherConf, publisherTopic)
-  }
-
-  private def globalPublisherConfiguration(): String = {
-    if (MistConfig.Kafka.isOn)
-      s"kafka://${MistConfig.Kafka.host}:${MistConfig.Kafka.port}"
-    else if (MistConfig.Mqtt.isOn)
-      s"mqtt://tcp://${MistConfig.Mqtt.host}:${MistConfig.Mqtt.port}"
-    else
-      ""
-  }
-
-  private def globalPublisherTopic(): String = {
-    if (MistConfig.Kafka.isOn)
-      MistConfig.Kafka.publishTopic
-    else if (MistConfig.Mqtt.isOn)
-      MistConfig.Mqtt.publishTopic
-    else
-      ""
-  }
-}

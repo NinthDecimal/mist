@@ -1,8 +1,13 @@
 package io.hydrosphere.mist.worker
 
+import java.util.concurrent.Executors
+
 import akka.actor._
 import io.hydrosphere.mist.Messages.JobMessages._
-import io.hydrosphere.mist.worker.runners.{MistJobRunner, JobRunner}
+import io.hydrosphere.mist.Messages.WorkerMessages.WorkerInitInfo
+import io.hydrosphere.mist.api.CentralLoggingConf
+import io.hydrosphere.mist.worker.runners.{JobRunner, MistJobRunner}
+import org.apache.spark.{SparkConf, SparkContext}
 
 import scala.collection.mutable
 import scala.concurrent._
@@ -11,26 +16,53 @@ import scala.util.{Failure, Success}
 
 case class ExecutionUnit(
   requester: ActorRef,
-  promise: Future[Either[String, Map[String, Any]]]
+  jobFuture: Future[Either[String, Map[String, Any]]]
 )
 
+trait JobStarting { that: Actor =>
 
-class WorkerActor(
-  name: String,
-  namedContext: NamedContext,
-  runner: JobRunner,
+  val namedContext: NamedContext
+  val runner: JobRunner
+
+  def startJob(req: RunJobRequest)(implicit ec: ExecutionContext): Future[Either[String, Map[String, Any]]] = {
+    val id = req.id
+    val future = Future {
+      namedContext.sparkContext.setJobGroup(req.id, req.id)
+      runner.run(req, namedContext)
+    }
+
+    future.onComplete(r => {
+      val message = r match {
+        case Success(Left(error)) => JobFailure(id, error)
+        case Success(Right(value)) => JobSuccess(id, value)
+        case Failure(e) => JobFailure(id, e.getMessage)
+      }
+      self ! message
+    })
+
+    future
+  }
+}
+
+class SharedWorkerActor(
+  val namedContext: NamedContext,
+  val runner: JobRunner,
   idleTimeout: Duration,
   maxJobs: Int
-) extends Actor with ActorLogging {
-
-  import java.util.concurrent.Executors.newFixedThreadPool
+) extends Actor with JobStarting with ActorLogging {
 
   val activeJobs = mutable.Map[String, ExecutionUnit]()
 
-  implicit val jobsContext = {
+  implicit val ec = {
+    val service = Executors.newFixedThreadPool(maxJobs)
     ExecutionContext.fromExecutorService(
-      newFixedThreadPool(maxJobs), (e) => log.error(e, "Error from thread pool")
+      service,
+      e => log.error(e, "Error from thread pool")
     )
+  }
+
+  override def preStart(): Unit = {
+    context.setReceiveTimeout(idleTimeout)
   }
 
   override def receive: Receive = {
@@ -39,6 +71,7 @@ class WorkerActor(
         sender() ! WorkerIsBusy(id)
       } else {
         val future = startJob(req)
+        log.info(s"Starting job: $id")
         activeJobs += id -> ExecutionUnit(sender(), future)
         sender() ! JobStarted(id)
       }
@@ -47,14 +80,14 @@ class WorkerActor(
     case CancelJobRequest(id) =>
       activeJobs.get(id) match {
         case Some(u) =>
-          namedContext.context.cancelJobGroup(id)
+          namedContext.sparkContext.cancelJobGroup(id)
           sender() ! JobIsCancelled(id)
         case None =>
           log.warning(s"Can not cancel unknown job $id")
       }
 
     case x: JobResponse =>
-      log.info(s"Jon execution done. Result $x")
+      log.info(s"Job execution done. Result $x")
       activeJobs.get(x.id) match {
         case Some(unit) =>
           unit.requester forward x
@@ -65,59 +98,106 @@ class WorkerActor(
       }
 
     case ReceiveTimeout if activeJobs.isEmpty =>
-      log.info(s"There is no activity on worker: $name. Stopping")
+      log.info(s"There is no activity on worker: $namedContext.. Stopping")
       context.stop(self)
   }
 
-  private def startJob(req: RunJobRequest): Future[Either[String, Map[String, Any]]] = {
-    val id = req.id
-    log.info(s"Starting job: $id")
-
-    val future = Future {
-      namedContext.context.setJobGroup(req.id, req.id)
-      runner.run(req.params, namedContext)
-    }
-
-    future.onComplete({
-      case Success(result) =>
-        result match {
-          case Left(error) =>
-            self ! JobFailure(id, error)
-          case Right(value) =>
-            self ! JobSuccess(id, value)
-        }
-
-      case Failure(e) =>
-        self ! JobFailure(id, e.getMessage)
-    })
-
-    future
-  }
-
-  override def preStart(): Unit = {
-    context.setReceiveTimeout(idleTimeout)
-  }
-
   override def postStop(): Unit = {
+    ec.shutdown()
     namedContext.stop()
-    jobsContext.shutdown()
   }
 
 }
-object WorkerActor {
+
+object SharedWorkerActor {
 
   def props(
-    name: String,
     context: NamedContext,
+    jobRunner: JobRunner,
     idleTimeout: Duration,
     maxJobs: Int
   ): Props =
-    Props(classOf[WorkerActor], name, context, MistJobRunner, idleTimeout, 10)
+    Props(classOf[SharedWorkerActor], context, jobRunner, idleTimeout, maxJobs)
 
-  def props(
-    name: String,
-    context: NamedContext,
-    maxJobs: Int
-  ): Props =
-    props(name, context, Duration.Inf, maxJobs)
+}
+
+class ExclusiveWorkerActor(
+  val namedContext: NamedContext,
+  val runner: JobRunner
+) extends Actor with JobStarting with ActorLogging {
+
+  implicit val ec = {
+    val service = Executors.newSingleThreadExecutor()
+    ExecutionContext.fromExecutorService(service)
+  }
+
+  override def receive: Receive = awaitRequest
+
+  val awaitRequest: Receive = {
+    case req @ RunJobRequest(id, params) =>
+      val future = startJob(req)
+      sender() ! JobStarted(id)
+      val unit = ExecutionUnit(sender(), future)
+      context.become(execute(unit))
+      log.info(s"Starting job: $id")
+  }
+
+  def execute(executionUnit: ExecutionUnit): Receive = {
+    case CancelJobRequest(id) =>
+      namedContext.sparkContext.cancelJobGroup(id)
+      sender() ! JobIsCancelled(id)
+      context.stop(self)
+
+    case x: JobResponse =>
+      log.info(s"Job execution done. Result $x")
+      executionUnit.requester forward x
+      context.stop(self)
+  }
+
+  override def postStop(): Unit = {
+    ec.shutdown()
+    namedContext.stop()
+  }
+
+}
+
+object ExclusiveWorkerActor {
+
+  def props(context: NamedContext, jobRunner: JobRunner): Props =
+    Props(classOf[ExclusiveWorkerActor], context, jobRunner)
+}
+
+object WorkerActor {
+
+  def propsFromInitInfo(name: String, contextName: String, mode: WorkerMode): WorkerInitInfo => (NamedContext, Props) = {
+
+    def mkNamedContext(info: WorkerInitInfo): NamedContext = {
+      import info._
+
+      val conf = new SparkConf().setAppName(name).setAll(info.sparkConf)
+      val sparkContext = new SparkContext(conf)
+
+      val centralLoggingConf = {
+        val hostPort = logService.split(":")
+        CentralLoggingConf(hostPort(0), hostPort(1).toInt)
+      }
+
+      new NamedContext(
+        sparkContext,
+        contextName,
+        org.apache.spark.streaming.Duration(info.streamingDuration.toMillis),
+        Option(centralLoggingConf)
+      )
+    }
+
+    (info: WorkerInitInfo) => {
+      val namedContext = mkNamedContext(info)
+      val props = mode match {
+        case Shared => SharedWorkerActor.props(namedContext, MistJobRunner, info.downtime, info.maxJobs)
+        case Exclusive => ExclusiveWorkerActor.props(namedContext, MistJobRunner)
+      }
+      (namedContext, props)
+    }
+  }
+
 }

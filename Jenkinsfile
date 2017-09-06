@@ -3,7 +3,7 @@ versions = [
         "1.5.2",
         "1.6.2",
         "2.0.2",
-        "2.1.0"
+        "2.1.1"
 ]
 
 def branches = [:]
@@ -19,28 +19,21 @@ parallel branches
 
 //some commit
 node("JenkinsOnDemand") {
-    def tag = sh(returnStdout: true, script: "git tag -l --contains HEAD").trim()
-
-    /*for (int i = 0; i < versions.size(); i++) {//TODO switch to each after JENKINS-26481
-        def ver = versions.get(i)
-        def dirName = "artifact${ver}"
-        dir(dirName) {
-            unstash dirName
-        }
-        sh "ls -la ${pwd()}/${dirName}"
+    stage('Final stage - scm checkout') {
+        checkout scm
+        sh "cd ${env.WORKSPACE}"
     }
-    sh "ls -la ${pwd()}"*/
 
+    def tag = sh(returnStdout: true, script: "git tag -l --contains HEAD").trim()
 
     if (tag.startsWith("v")) {
         stage('Publish in Maven') {
-            //TODO Fetch artifacts from previous steps, using stash/unstash
-
-            sh "${env.WORKSPACE}/sbt/sbt 'set pgpPassphrase := Some(Array())' mistLibSpark1/publishSigned"
-            sh "${env.WORKSPACE}/sbt/sbt mistLibSpark1/sonatypeRelease"
-
-            sh "${env.WORKSPACE}/sbt/sbt 'set pgpPassphrase := Some(Array())' mistLibSpark2/publishSigned"
-            sh "${env.WORKSPACE}/sbt/sbt mistLibSpark2/sonatypeRelease"
+            publishVersions = ["1.5.2", "2.1.0"]
+            for(int i = 0; i < publishVersions.size(); i++) {
+              def v = publishVersions.get(i)
+              sh "${env.WORKSPACE}/sbt/sbt -DsparkVersion=${v} 'set pgpPassphrase := Some(Array())' mistLib/publishSigned"
+              sh "${env.WORKSPACE}/sbt/sbt -DsparkVersion=${v} 'project mistLib' 'sonatypeRelease'"
+            }
         }
     }
 }
@@ -58,15 +51,22 @@ def test_mist(slaveName, sparkVersion) {
                     //Clear derby databases
                     sh "rm -rf metastore_db recovery.db derby.log"
                     echo 'Testing Mist with Spark version: ' + sparkVersion
-                    sh "${env.WORKSPACE}/sbt/sbt -DsparkVersion=${sparkVersion} clean assembly testAll"
+                    sh "${env.WORKSPACE}/sbt/sbt -Dsbt.override.build.repos=true -Dsbt.repository.config=${env.WORKSPACE}/project/repositories -DsparkVersion=${sparkVersion} clean assembly testAll"
                 }
-
-                //stash name: "artifact${sparkVersion}", includes: "target/**/mist-assembly-*.jar"
 
                 def tag = sh(returnStdout: true, script: "git tag -l --contains HEAD").trim()
                 if (tag.startsWith("v")) {
+                    version = tag.replace("v", "")
                     stage('Publish in DockerHub') {
                         sh "${env.WORKSPACE}/sbt/sbt -DsparkVersion=${sparkVersion} mist/dockerBuildAndPush"
+                    }
+
+                    stage("upload tar") {
+                      sh "${env.WORKSPACE}/sbt/sbt -DsparkVersion=${sparkVersion} mist/packageTar"
+                      tar = "${env.WORKSPACE}/target/mist-${version}-${sparkVersion}.tar.gz"
+                      sshagent(['hydrosphere_static_key']) {
+                        sh "scp -o StrictHostKeyChecking=no ${tar} hydrosphere@52.28.47.238:publish_dir"
+                      }
                     }
                 }
             }

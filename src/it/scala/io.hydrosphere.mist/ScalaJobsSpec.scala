@@ -3,23 +3,27 @@ package io.hydrosphere.mist
 import java.nio.file.{Files, Paths}
 
 import io.hydrosphere.mist.jobs.JobResult
+import io.hydrosphere.mist.master.interfaces.JsonCodecs
 import org.scalatest.{FunSpec, Matchers}
 
-import io.hydrosphere.mist.master.interfaces.http.JsonCodecs._
+import JsonCodecs._
 import spray.json.pimpString
 
 import scalaj.http.Http
 
 class ScalaJobsSpec extends FunSpec with MistItTest  with Matchers {
 
-  override val configPath: String = "scalajobs/integration.conf"
+  override val overrideConf= Some("scalajobs/integration.conf")
+  override val overrideRouter = Some("scalajobs/router.conf")
+
+  val interface = MistHttpInterface("localhost", 2004)
 
   describe("simple context") {
     val sparkPref = sparkVersion.split('.').head
 
     val jobSource = s"""
        |
-       | import io.hydrosphere.mist.lib.spark$sparkPref.MistJob
+       | import io.hydrosphere.mist.api.MistJob
        |
        | object SimpleContext extends MistJob {
        |
@@ -39,21 +43,9 @@ class ScalaJobsSpec extends FunSpec with MistItTest  with Matchers {
       compiler.compile(jobSource, "SimpleContext")
       JarPackager.pack(targetDir, targetDir)
 
-      val req = Http("http://localhost:2004/api/simple-context1")
-        .timeout(30 * 1000, 30 * 1000)
-        .header("Content-Type", "application/json")
-        .postData(
-          s"""
-             |{
-             |  "numbers" : [1, 2, 3]
-             |}
-           """.stripMargin)
-
-      val resp = req.asString
-      resp.code shouldBe 200
-
-      val result = resp.body.parseJson.convertTo[JobResult]
-
+      val result = interface.runJob("simple-context1",
+        "numbers" -> List(1, 2, 3)
+      )
       assert(result.success, s"Job is failed $result")
     
     }}
@@ -66,21 +58,9 @@ class ScalaJobsSpec extends FunSpec with MistItTest  with Matchers {
       compiler.compile(jobSource, "SimpleContext")
       JarPackager.pack(targetDir, targetDir)
 
-      val req = Http("http://localhost:2004/api/simple-context2")
-        .timeout(30 * 1000, 30 * 1000)
-        .header("Content-Type", "application/json")
-        .postData(
-          s"""
-             |{
-             |  "numbers" : [1, 2, 3]
-             |}
-           """.stripMargin)
-
-      val resp = req.asString
-      resp.code shouldBe 200
-
-      val result = resp.body.parseJson.convertTo[JobResult]
-
+      val result = interface.runJob("simple-context2",
+        "numbers" -> List(1, 2, 3)
+      )
       assert(result.success, s"Job is failed $result")
     
     }}

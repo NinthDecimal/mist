@@ -3,11 +3,12 @@ package io.hydrosphere.mist.worker
 import akka.actor._
 import akka.cluster.Cluster
 import akka.cluster.ClusterEvent._
-import io.hydrosphere.mist.Messages.WorkerMessages.WorkerRegistration
+import io.hydrosphere.mist.Messages.WorkerMessages.{WorkerInitInfoReq, WorkerInitInfo, WorkerRegistration}
 
 class ClusterWorker(
   name: String,
-  underlying: Props
+  contextName: String,
+  workerInit: WorkerInitInfo => (NamedContext, Props)
 ) extends Actor with ActorLogging {
 
   val cluster = Cluster(context.system)
@@ -20,10 +21,11 @@ class ClusterWorker(
     cluster.unsubscribe(self)
   }
 
-  def startWorker(): ActorRef = {
-    val ref = context.actorOf(underlying)
+  def startWorker(initInfo: WorkerInitInfo): (NamedContext, ActorRef) = {
+    val (nm, props) = workerInit(initInfo)
+    val ref = context.actorOf(props)
     context.watch(ref)
-    ref
+    (nm, ref)
   }
 
   def receive = initial
@@ -31,13 +33,22 @@ class ClusterWorker(
   def initial: Receive = {
     case MemberUp(m) if m.hasRole("master") =>
       log.info(s"Joined to cluster. Master ${m.address}")
-      val worker = startWorker()
-      register(m.address)
-      context become joined(m.address, worker)
+      requestInfo(m.address)
+      context become joined(m.address)
   }
 
 
-  def joined(master: Address, worker: ActorRef): Receive = {
+  def joined(master: Address): Receive = {
+    case info: WorkerInitInfo =>
+      log.info("Received init info {}", info)
+      val (nm, worker) = startWorker(info)
+      log.info("Worker actor started")
+      val ui = SparkUtils.getSparkUiAddress(nm.sparkContext)
+      register(master, ui)
+      context become initialized(master, worker)
+  }
+
+  def initialized(master: Address, worker: ActorRef): Receive = {
     case Terminated(ref) if ref == worker =>
       log.info(s"Worker reference for $name is terminated, leave cluster")
       cluster.leave(cluster.selfAddress)
@@ -57,13 +68,18 @@ class ClusterWorker(
 
     case x =>
       log.debug(s"Worker interface received $x")
+
   }
 
   private def toManagerSelection(address: Address): ActorSelection =
     cluster.system.actorSelection(RootActorPath(address) / "user" / "workers-manager")
 
-  private def register(address: Address): Unit = {
-    toManagerSelection(address) ! WorkerRegistration(name, cluster.selfAddress)
+  private def register(address: Address, sparkUi: Option[String]): Unit = {
+    toManagerSelection(address) ! WorkerRegistration(name, cluster.selfAddress, sparkUi)
+  }
+
+  private def requestInfo(address: Address): Unit = {
+    toManagerSelection(address) ! WorkerInitInfoReq(contextName)
   }
 
 
@@ -71,8 +87,8 @@ class ClusterWorker(
 
 object ClusterWorker {
 
-  def props(name: String, workerProps: Props): Props = {
-    Props(classOf[ClusterWorker], name, workerProps)
+  def props(name: String, contextName: String, workerInit: WorkerInitInfo => (NamedContext, Props)): Props = {
+    Props(classOf[ClusterWorker], name, contextName, workerInit)
   }
 
 }

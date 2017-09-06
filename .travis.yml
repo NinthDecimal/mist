@@ -4,8 +4,12 @@ services:
 
 language: scala
 
+git:
+  submodules: false
+
 before_install:
   - export TRAVIS_BRANCH=`echo $TRAVIS_BRANCH | sed 's%[/_]%-%g'`
+
 
 script:
   - sbt -DsparkVersion=$SPARK_VERSION -no-colors -J-Xss2m testAll
@@ -16,6 +20,7 @@ cache:
     - $HOME/.sbt
     - $HOME/.coursier
     - spark_local
+    - ui_local
 
 env:
   global:

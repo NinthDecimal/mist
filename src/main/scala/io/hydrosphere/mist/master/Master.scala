@@ -2,99 +2,171 @@ package io.hydrosphere.mist.master
 
 import java.io.File
 
-import akka.actor.{ActorRef, ActorSystem, Props}
+import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.server.Directives._
 import akka.stream.ActorMaterializer
 import com.typesafe.config.ConfigFactory
+import io.hydrosphere.mist.Messages.StatusMessages.SystemEvent
 import io.hydrosphere.mist.Messages.WorkerMessages.{CreateContext, StopAllWorkers}
-import io.hydrosphere.mist.master.interfaces.async.AsyncInterface
-import io.hydrosphere.mist.master.interfaces.async.AsyncInterface.Provider
+import io.hydrosphere.mist.jobs.JobDetails.Source
+import io.hydrosphere.mist.master.data.{EndpointsStorage, ContextsStorage}
+import io.hydrosphere.mist.master.interfaces.async._
 import io.hydrosphere.mist.master.interfaces.cli.CliResponder
-import io.hydrosphere.mist.master.interfaces.http.{HttpApi, HttpUi}
-import io.hydrosphere.mist.master.store.JobRepository
+import io.hydrosphere.mist.master.interfaces.http._
+import io.hydrosphere.mist.master.logging.{LogStorageMappings, LogStreams}
+import io.hydrosphere.mist.master.store.H2JobsRepository
 import io.hydrosphere.mist.utils.Logger
-import io.hydrosphere.mist.{Constants, MistConfig}
+import io.hydrosphere.mist.Constants
+import io.hydrosphere.mist.master.security.KInitLauncher
 
+import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 import scala.language.reflectiveCalls
+
 
 /** This object is entry point of Mist project */
 object Master extends App with Logger {
 
-  implicit val system = ActorSystem("mist", MistConfig.Akka.Main.settings)
-  implicit val materializer = ActorMaterializer()
+  try {
 
-  val jobRoutes = new JobRoutes(MistConfig.Http.routerConfigPath)
+    val appArguments = MasterAppArguments.parse(args) match {
+      case Some(arg) => arg
+      case None => sys.exit(1)
+    }
 
-  val workerRunner = selectRunner(MistConfig.Workers.runner)
-  val store = JobRepository()
-  val statusService = system.actorOf(StatusService.props(store), "status-service")
-  val workerManager = system.actorOf(WorkersManager.props(statusService, workerRunner), "workers-manager")
+    val config = MasterConfig.load(appArguments.configPath)
 
-  val masterService = new MasterService(
-    workerManager,
-    statusService,
-    jobRoutes)
+    if (config.security.enabled) {
+      import scala.concurrent.ExecutionContext.Implicits.global
+      import config.security._
 
-  MistConfig.Contexts.precreated foreach { name =>
-    logger.info(s"Precreate context for $name namespace")
-    workerManager ! CreateContext(name)
-  }
+      logger.info("Security is enabled - starting Knit loop")
+      val ps = KInitLauncher.create(keytab, principal, interval)
+      ps.run().onFailure({
+        case e: Throwable =>
+          logger.error("KInit process failed", e)
+          sys.exit(1)
+      })
+    }
 
-  if (MistConfig.Http.isOn) {
-    val api = new HttpApi(masterService)
-    val http = HttpUi.route ~ api.route
-    Http().bindAndHandle(http, MistConfig.Http.host, MistConfig.Http.port)
-  }
+    val endpointsStorage = EndpointsStorage.create(config.endpointsPath, appArguments.routerConfigPath)
+    val contextsStorage = ContextsStorage.create(config.contextsPath, appArguments.configPath)
 
-  // Start CLI
-  system.actorOf(
-    CliResponder.props(masterService, workerManager),
-    name = Constants.Actors.cliResponderName)
+    implicit val system = ActorSystem("mist", config.raw)
+    implicit val materializer = ActorMaterializer()
 
-  AsyncInterface.init(system, masterService)
+    val workerRunner = WorkerRunner.create(config)
 
-  // Start MQTT subscriber
-  if (MistConfig.Mqtt.isOn) {
-    logger.info("Mqtt interface is started")
-    AsyncInterface.subscriber(AsyncInterface.Provider.Mqtt)
-  }
+    val store = H2JobsRepository(config.dbPath)
 
-  // Start Kafka subscriber
-  if (MistConfig.Kafka.isOn) {
-    AsyncInterface.subscriber(AsyncInterface.Provider.Kafka)
-  }
+    val streamer = EventsStreamer(system)
 
-  val publishers = enabledAsyncPublishers()
-  masterService.recoverJobs(publishers)
+    val wsPublisher = new JobEventPublisher {
+      override def notify(event: SystemEvent): Unit =
+        streamer.push(event)
 
-  // We need to stop contexts on exit
-  sys addShutdownHook {
-    logger.info("Stopping all the contexts")
-    workerManager ! StopAllWorkers
-    system.shutdown()
-  }
+      override def close(): Unit = {}
+    }
 
-  private def enabledAsyncPublishers(): Map[Provider, ActorRef] = {
-    val providers = Seq[Provider](Provider.Kafka, Provider.Mqtt).filter({
-      case Provider.Kafka => MistConfig.Kafka.isOn
-      case Provider.Mqtt => MistConfig.Mqtt.isOn
+    val eventPublishers = buildEventPublishers(config) :+ wsPublisher
+
+    val logsMappings = LogStorageMappings.create(config.logs.dumpDirectory)
+    val logsService = LogStreams.runService(
+      config.logs.host, config.logs.port,
+      logsMappings, eventPublishers
+    )
+    val jobsLogger = logsService.getLogger
+    val statusService = system.actorOf(StatusService.props(store, eventPublishers, jobsLogger), "status-service")
+    val infoProvider = new InfoProvider(config.logs, contextsStorage)
+    val workerManager = system.actorOf(
+      WorkersManager.props(
+        statusService, workerRunner,
+        jobsLogger,
+        config.workers.runnerInitTimeout,
+        infoProvider
+      ), "workers-manager")
+
+    val jobService = new JobService(workerManager, statusService)
+    val masterService = new MasterService(
+      jobService,
+      endpointsStorage,
+      contextsStorage,
+      logsMappings
+    )
+
+    val precreated = Await.result(contextsStorage.precreated, Duration.Inf)
+    precreated.foreach(context => {
+      logger.info(s"Precreate context for ${context.name}")
+      workerManager ! CreateContext(context)
     })
 
-    providers.map(p => p -> AsyncInterface.publisher(p)).toMap
-  }
+    // Start CLI
+    system.actorOf(
+      CliResponder.props(masterService, workerManager),
+      name = Constants.Actors.cliResponderName)
 
-  private def selectRunner(s: String): WorkerRunner = {
-    s match {
-      case "local" =>
-        val sparkHome = System.getenv("SPARK_HOME").ensuring(_.nonEmpty, "SPARK_HOME is not defined!")
-        new LocalWorkerRunner(sparkHome)
+    masterService.recoverJobs()
 
-      case "docker" => DockerWorkerRunner
-      case "manual" => ManualWorkerRunner
-      case _ =>
-        throw new IllegalArgumentException(s"Unknown worker runner type $s")
-
+    val http = {
+      val api = new HttpApi(masterService)
+      val apiv2 = {
+        val api = HttpV2Routes.apiWithCORS(masterService)
+        val ws = new WSApi(streamer)
+        // order is important!
+        // api router can't chain unhandled calls, because it's wrapped in cors directive
+        ws.route ~ api
+      }
+      val http = new HttpUi(config.http.uiPath).route ~ api.route ~ DevApi.devRoutes(masterService) ~ apiv2
+      Http().bindAndHandle(http, config.http.host, config.http.port)
     }
+
+    // Start MQTT subscriber
+    if (config.mqtt.isOn) {
+      import config.mqtt._
+
+      val input = AsyncInput.forMqtt(host, port, subscribeTopic)
+      new AsyncInterface(masterService, input, Source.Async("Mqtt")).start()
+      logger.info("Mqtt interface is started")
+    }
+
+    // Start Kafka subscriber
+    if (config.kafka.isOn) {
+      import config.kafka._
+
+      val input = AsyncInput.forKafka(host, port, subscribeTopic)
+      new AsyncInterface(masterService, input, Source.Async("Kafka")).start()
+      logger.info("Kafka interface is started")
+    }
+
+
+
+    // We need to stop contexts on exit
+    sys addShutdownHook {
+      logger.info("Stopping all the contexts")
+      workerManager ! StopAllWorkers
+      system.shutdown()
+    }
+  } catch {
+    case e: Throwable =>
+      logger.error("Fatal error", e)
+      sys.exit(1)
   }
+
+  private def buildEventPublishers(config: MasterConfig): Seq[JobEventPublisher] = {
+    val buffer = new ArrayBuffer[JobEventPublisher](3)
+    if (config.kafka.isOn) {
+      import config.kafka._
+
+      buffer += JobEventPublisher.forKafka(host, port, publishTopic)
+    }
+    if (config.mqtt.isOn) {
+      import config.mqtt._
+      buffer += JobEventPublisher.forMqtt(host, port, publishTopic)
+    }
+
+    buffer
+  }
+
 }

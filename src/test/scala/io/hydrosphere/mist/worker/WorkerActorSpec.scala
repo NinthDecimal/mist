@@ -1,12 +1,13 @@
 package io.hydrosphere.mist.worker
 
-import akka.actor.{ActorRef, ActorSystem, Props}
-import akka.testkit.{TestActorRef, TestActor, TestKit, TestProbe}
+import akka.actor.{Actor, ActorRef, ActorSystem, Props}
+import akka.testkit.{TestActorRef, TestKit, TestProbe}
 import io.hydrosphere.mist.Messages.JobMessages._
 import io.hydrosphere.mist.jobs.Action
 import io.hydrosphere.mist.worker.runners.JobRunner
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest._
+import org.scalatest.prop.TableDrivenPropertyChecks._
 
 import scala.concurrent.duration.Duration
 
@@ -24,39 +25,79 @@ class WorkerActorSpec extends TestKit(ActorSystem("WorkerSpec"))
 
   override def afterAll {
     TestKit.shutdownActorSystem(system)
-    context.stop()
+    context.sparkContext.stop()
   }
 
   override def beforeAll {
-    context = NamedContext("test", conf)
-  }
-
-  it("should execute jobs") {
-    val runner = SuccessRunner(Map("answer" -> 42))
-
-    val probe = TestProbe()
-    val worker = testWorkerActor(runner)
-
-    probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
-
-    probe.expectMsgType[JobStarted]
-    probe.expectMsgPF(){
-      case JobSuccess("id", r) =>
-        r shouldBe Map("answer" -> 42)
+    val spContext = new SparkContext(conf)
+    context = new NamedContext(spContext, "test") {
+      override def stop(): Unit = {} //do not close ctx during tests
     }
   }
 
-  it("should respond failure") {
-    val runner = FailureRunner("Expected error")
-    val worker = testWorkerActor(runner)
+  describe("common behavior") {
 
-    val probe = TestProbe()
-    probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
+    type WorkerProps = JobRunner => Props
 
-    probe.expectMsgType[JobStarted]
-    probe.expectMsgPF(){
-      case JobFailure("id", e) =>
-        e shouldBe "Expected error"
+    val workers = Table[String, WorkerProps](
+      ("name", "f"),
+      ("shared", (r: JobRunner) => SharedWorkerActor.props(context, r, Duration.Inf, 10)),
+      ("exclusive", (r: JobRunner) => ExclusiveWorkerActor.props(context, r))
+    )
+
+    forAll(workers) { (name, makeProps) =>
+      it(s"should execute jobs in $name mode") {
+        val runner = SuccessRunner(Map("answer" -> 42))
+
+        val probe = TestProbe()
+        val worker = createActor(makeProps(runner))
+
+        probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
+
+        probe.expectMsgType[JobStarted]
+        probe.expectMsgPF(){
+          case JobSuccess("id", r) =>
+            r shouldBe Map("answer" -> 42)
+        }
+      }
+
+      it(s"should respond failure in $name mode") {
+        val runner = FailureRunner("Expected error")
+        val worker = createActor(makeProps(runner))
+
+        val probe = TestProbe()
+        probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
+
+        probe.expectMsgType[JobStarted]
+        probe.expectMsgPF(){
+          case JobFailure("id", e) =>
+            e shouldBe "Expected error"
+        }
+      }
+
+      it(s"should cancel job in $name mode") {
+        val runner = new JobRunner {
+          override def run(req: RunJobRequest, c: NamedContext): Either[String, Map[String, Any]] = {
+            val sc = c.sparkContext
+            val r = sc.parallelize(1 to 10000, 2).map { i => Thread.sleep(10000); i }.count()
+            Right(Map("r" -> "Ok"))
+          }
+        }
+
+        val worker = createActor(makeProps(runner))
+
+        val probe = TestProbe()
+        probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
+        probe.send(worker, CancelJobRequest("id"))
+
+        probe.expectMsgType[JobStarted]
+        probe.expectMsgType[JobIsCancelled]
+      }
+
+      def createActor(props: Props): ActorRef = {
+        TestActorRef[Actor](props)
+      }
+
     }
   }
 
@@ -67,7 +108,9 @@ class WorkerActorSpec extends TestKit(ActorSystem("WorkerSpec"))
     })
 
     val probe = TestProbe()
-    val worker = testWorkerActor(runner, 2)
+
+    val props = SharedWorkerActor.props(context, runner, Duration.Inf, 2)
+    val worker = TestActorRef[SharedWorkerActor](props)
 
     probe.send(worker, RunJobRequest("1", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
     probe.send(worker, RunJobRequest("2", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
@@ -78,35 +121,6 @@ class WorkerActorSpec extends TestKit(ActorSystem("WorkerSpec"))
     probe.expectMsgType[WorkerIsBusy]
   }
 
-  private def testWorkerActor(runner: JobRunner, maxJobs: Int = 10): ActorRef = {
-    val props = Props(
-      classOf[WorkerActor],
-      "test", context, runner, Duration.Inf, 2)
-    //val ref = system.actorOf(props)
-
-    TestActorRef[WorkerActor](props)
-  }
-
-  it("should cancel job") {
-    val runner = new JobRunner {
-      override def run(p: JobParams, c: NamedContext): Either[String, Map[String, Any]] = {
-        val sc = c.context
-        val r = sc.parallelize(1 to 10000, 2).map { i => Thread.sleep(10000); i }.count()
-        Right(Map("r" -> "Ok"))
-
-      }
-    }
-
-    val worker = testWorkerActor(runner)
-
-    val probe = TestProbe()
-    probe.send(worker, RunJobRequest("id", JobParams("path", "MyClass", Map.empty, action = Action.Execute)))
-    probe.send(worker, CancelJobRequest("id"))
-
-    probe.expectMsgType[JobStarted]
-    probe.expectMsgType[JobIsCancelled]
-  }
-
   def SuccessRunner(r: => Map[String, Any]): JobRunner =
     testRunner(Right(r))
 
@@ -115,7 +129,7 @@ class WorkerActorSpec extends TestKit(ActorSystem("WorkerSpec"))
 
   def testRunner(f: => Either[String, Map[String, Any]]): JobRunner = {
     new JobRunner {
-      def run(p: JobParams, c: NamedContext): Either[String, Map[String, Any]] = f
+      def run(p: RunJobRequest, c: NamedContext): Either[String, Map[String, Any]] = f
     }
   }
 }

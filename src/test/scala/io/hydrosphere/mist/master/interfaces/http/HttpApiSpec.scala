@@ -2,39 +2,42 @@ package io.hydrosphere.mist.master.interfaces.http
 
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.testkit.ScalatestRouteTest
+import io.hydrosphere.mist.Messages.JobMessages.JobParams
+import io.hydrosphere.mist.MockitoSugar
 import io.hydrosphere.mist.jobs.JobDetails.Source
-import io.hydrosphere.mist.jobs.jar._
 import io.hydrosphere.mist.jobs._
-import io.hydrosphere.mist.master.{JobExecutionStatus, MasterService, WorkerLink}
-import io.hydrosphere.mist.utils.TypeAlias.JobParameters
-import org.mockito.Mockito._
-import org.mockito.Matchers._
+import io.hydrosphere.mist.jobs.jar._
+import io.hydrosphere.mist.master.interfaces.JsonCodecs
+import io.hydrosphere.mist.master.models.{FullEndpointInfo, EndpointConfig, EndpointStartRequest, RunSettings}
+import io.hydrosphere.mist.master.{JobService, MasterService, WorkerLink}
 import org.scalatest.{FunSpec, Matchers}
 
 import scala.concurrent.Future
 
-class HttpApiSpec extends FunSpec with Matchers with ScalatestRouteTest {
+class HttpApiSpec extends FunSpec with Matchers with MockitoSugar with ScalatestRouteTest {
 
   import JsonCodecs._
 
-  it("should serve active jobs") {
-    val master = mock(classOf[MasterService])
-    val api = new HttpApi(master).route
+  val details = JobDetails(
+    params = JobParams("path", "className", Map.empty, Action.Execute),
+    jobId = "id",
+    source = Source.Http,
+    endpoint = "endpoint",
+    context = "context",
+    externalId = None,
+    workerId = "workerId"
+  )
 
-    when(master.activeJobs()).thenReturn(
-      Future.successful(
-        List(JobDetails(
-          configuration = JobExecutionParams(
-            "path", "MyClass", "namespace", Map.empty, None, None, Action.Execute
-          ),
-          source = Source.Http,
-          jobId = "id"
-        ))
-      )
+  it("should serve active jobs") {
+    val jobService = mock[JobService]
+    when(jobService.activeJobs()).thenReturn(
+      Future.successful(List(details))
     )
 
+    val api = new HttpApi(masterMock(jobService)).route
+
     Get("/internal/jobs") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
 
       val r = responseAs[List[JobDetails]]
       r.size shouldBe 1
@@ -42,77 +45,73 @@ class HttpApiSpec extends FunSpec with Matchers with ScalatestRouteTest {
   }
 
   it("should stop job") {
-    val master = mock(classOf[MasterService])
-    val api = new HttpApi(master).route
+    val jobService = mock[JobService]
+    when(jobService.stopJob(any[String])).thenReturn(Future.successful(Some(details)))
 
-    when(master.stopJob(any[String], any[String])).
-      thenReturn(Future.successful(()))
+    val api = new HttpApi(masterMock(jobService)).route
 
     Delete("/internal/jobs/namespace/id") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
     }
   }
 
   it("should serve workers") {
-    val master = mock(classOf[MasterService])
-    val api = new HttpApi(master).route
+    val jobService = mock[JobService]
+    when(jobService.workers()).thenReturn(
+      Future.successful( List(WorkerLink("name", "address", None)) ))
 
-    when(master.workers()).thenReturn(
-      Future.successful(
-        List(WorkerLink("name", "address"))
-      ))
+    val api = new HttpApi(masterMock(jobService)).route
 
     Get("/internal/workers") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
 
       val r = responseAs[List[WorkerLink]]
-      r shouldBe List(WorkerLink("name", "address"))
+      r shouldBe List(WorkerLink("name", "address", None))
     }
   }
 
   it("should stop worker") {
-    val master = mock(classOf[MasterService])
-    val api = new HttpApi(master).route
+    val jobService = mock[JobService]
+    when(jobService.stopWorker(any[String])).thenReturn(Future.successful(()))
 
-    when(master.stopWorker(any[String])).thenReturn(Future.successful("id"))
+    val api = new HttpApi(masterMock(jobService)).route
 
     Delete("/internal/workers/id") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
     }
   }
 
   it("should stop workers") {
-    val master = mock(classOf[MasterService])
-    val api = new HttpApi(master).route
+    val jobService = mock[JobService]
+    when(jobService.stopAllWorkers()).thenReturn(Future.successful(()))
 
-    when(master.stopAllWorkers()).thenReturn(Future.successful(()))
-
+    val api = new HttpApi(masterMock(jobService)).route
     Delete("/internal/workers") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
     }
   }
 
 
   it("should serve routes") {
-    val master = mock(classOf[MasterService])
+    val master = mock[MasterService]
     val api = new HttpApi(master).route
 
-    val pyInfo = PyJobInfo(
-      JobDefinition("pyjob", "path_to_job.py", "PyJob", "namespace"))
-
     val testJobClass = io.hydrosphere.mist.jobs.jar.MultiplyJob
-    val jvmInfo = JvmJobInfo(
-      JobDefinition("scalajob", "path_to_jar.jar", "ScalaJob", "namespace"),
-      JobsLoader.Common.loadJobClass(testJobClass.getClass.getCanonicalName).get
-    )
-    when(master.listRoutesInfo()).thenReturn(Seq(pyInfo, jvmInfo))
+    val jvmInfo = JvmJobInfo(JobsLoader.Common.loadJobClass(testJobClass.getClass.getCanonicalName).get)
+
+    when(master.endpointsInfo).thenReturn(Future.successful(
+      Seq(
+      FullEndpointInfo(EndpointConfig("pyjob", "", "", ""), PyJobInfo),
+      FullEndpointInfo(EndpointConfig("scalajob", "", "", ""), jvmInfo)
+    )))
 
     Get("/internal/routers") ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
 
       responseAs[Map[String, HttpJobInfo]] should contain allOf(
-        "pyjob" -> HttpJobInfo.forPython(),
+        "pyjob" -> HttpJobInfo.forPython("pyjob"),
         "scalajob" -> HttpJobInfo(
+          name = "scalajob",
           execute = Some(
             Map("numbers" -> HttpJobArg("MList", Seq(HttpJobArg("MInt", Seq.empty))))
           )
@@ -122,23 +121,21 @@ class HttpApiSpec extends FunSpec with Matchers with ScalatestRouteTest {
   }
 
   it("should start job") {
-    val master = mock(classOf[MasterService])
+    val master = mock[MasterService]
     val api = new HttpApi(master).route
-    when(master.startJob(
-      any[String],
-      any[Action],
-      any[JobParameters],
-      any[Source],
-      any[Option[String]]
-    ))
-      .thenReturn(Future.successful(
-        JobResult.success(Map("yoyo" -> "hello"),
-        JobExecutionParams("", "", "", Map.empty, None, None, Action.Execute))
-      ))
+    when(master.forceJobRun(any[EndpointStartRequest], any[Source], any[Action]))
+      .thenReturn(Future.successful(Some(
+        JobResult.success(Map("yoyo" -> "hello"))
+      )))
 
     Post("/api/my-job", Map("Hello" -> "123")) ~> api ~> check {
-      status === StatusCodes.OK
+      status shouldBe StatusCodes.OK
     }
   }
 
+  def masterMock(jobService: JobService): MasterService = {
+    val master = mock[MasterService]
+    when(master.jobService).thenReturn(jobService)
+    master
+  }
 }

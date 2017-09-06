@@ -1,5 +1,8 @@
-import AssemblyKeys._
 import sbt.Keys._
+import StageDist._
+import complete.DefaultParsers._
+import sbtassembly.AssemblyPlugin.autoImport._
+import sbtassembly.AssemblyOption
 
 resolvers ++= Seq(
   Resolver.sonatypeRepo("releases"),
@@ -10,89 +13,69 @@ resolvers ++= Seq(
 )
 
 lazy val sparkVersion: SettingKey[String] = settingKey[String]("Spark version")
+lazy val sparkMajorVersion: SettingKey[String] = settingKey[String]("Spark major version")
 lazy val sparkLocal: TaskKey[File] = taskKey[File]("Download spark distr")
-lazy val mistRun: TaskKey[Unit] = taskKey[Unit]("Run mist locally")
+lazy val mistRun: InputKey[Unit] = inputKey[Unit]("Run mist locally")
 
 lazy val versionRegex = "(\\d+)\\.(\\d+).*".r
+
+lazy val currentSparkVersion=util.Properties.propOrElse("sparkVersion", "1.5.2")
+
+lazy val mistScalaCrossCompile = currentSparkVersion match {
+  case versionRegex("1", minor) => Seq("2.10.6")
+  case _ => Seq("2.11.8")
+}
 
 lazy val commonSettings = Seq(
   organization := "io.hydrosphere",
 
-  sparkVersion := util.Properties.propOrElse("sparkVersion", "1.5.2"),
+  sparkVersion := currentSparkVersion,
+  sparkMajorVersion := sparkVersion.value.split('.').head,
   scalaVersion := (
     sparkVersion.value match {
       case versionRegex("1", minor) => "2.10.6"
       case _ => "2.11.8"
-  }),
+    }),
 
-  crossScalaVersions := Seq("2.10.6", "2.11.8"),
-  version := "0.11.0"
-
+  crossScalaVersions := mistScalaCrossCompile,
+  version := "0.13.1"
 )
 
-lazy val mistLibSpark1= project.in(file("mist-lib-spark1"))
-  .settings(assemblySettings)
+lazy val mistLib = project.in(file("mist-lib"))
   .settings(commonSettings: _*)
   .settings(PublishSettings.settings: _*)
   .settings(
-    name := "mist-lib-spark1",
-    scalaVersion := "2.10.6",
-    libraryDependencies ++= sparkDependencies("1.5.2"),
-
+    name := s"mist-lib-spark${sparkMajorVersion.value}",
+    libraryDependencies ++= sparkDependencies(currentSparkVersion),
     libraryDependencies ++= Seq(
-      "org.apache.kafka" % "kafka-clients" % "0.8.2.0" exclude("log4j", "log4j") exclude("org.slf4j","slf4j-log4j12"),
-      "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.1.0"
-    )
-  )
-
-lazy val mistLibSpark2 = project.in(file("mist-lib-spark2"))
-  .settings(assemblySettings)
-  .settings(commonSettings: _*)
-  .settings(PublishSettings.settings: _*)
-  .settings(
-    name := "mist-lib-spark2",
-    scalaVersion := "2.11.8",
-    libraryDependencies ++= sparkDependencies("2.0.0"),
-    libraryDependencies ++= Seq(
-      "org.json4s" %% "json4s-native" % "3.2.10",
-      "org.apache.parquet" % "parquet-column" % "1.7.0",
-      "org.apache.parquet" % "parquet-hadoop" % "1.7.0",
-      "org.apache.parquet" % "parquet-avro" % "1.7.0",
+      "com.typesafe.akka" %% "akka-stream-experimental" % "2.0.4",
 
       "org.scalatest" %% "scalatest" % "3.0.1" % "test",
       "org.slf4j" % "slf4j-api" % "1.7.5" % "test",
       "org.slf4j" % "slf4j-log4j12" % "1.7.5" % "test"
-    ),
-
-    libraryDependencies ++= Seq(
-      "org.apache.kafka" % "kafka-clients" % "0.8.2.0",
-      "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.1.0"
-      )
+    )
   )
 
-lazy val currentLib = util.Properties.propOrElse("sparkVersion", "1.5.2") match {
-  case versionRegex("1", minor) => mistLibSpark1
-  case _ => mistLibSpark2
-}
-
-lazy val currentExamples = util.Properties.propOrElse("sparkVersion", "1.5.2") match {
+lazy val currentExamples = currentSparkVersion match {
   case versionRegex("1", minor) => examplesSpark1
   case _ => examplesSpark2
 }
 
+
 lazy val mist = project.in(file("."))
-  .dependsOn(currentLib)
-  .enablePlugins(DockerPlugin)
-  .settings(assemblySettings)
+  .dependsOn(mistLib)
+  .enablePlugins(DockerPlugin, BuildInfoPlugin)
   .settings(commonSettings: _*)
   .configs(IntegrationTest)
-  .settings(Defaults.itSettings : _*)
+  .settings(Defaults.itSettings: _*)
   .settings(commonAssemblySettings: _*)
-  .settings(mistRunSettings: _*)
+  .settings(mistMiscTasks: _*)
+  .settings(StageDist.settings: _*)
   .settings(dockerSettings: _*)
+  .settings(Ui.settings: _*)
   .settings(
     name := "mist",
-    libraryDependencies ++= sparkDependencies(sparkVersion.value),
+    libraryDependencies ++= sparkDependencies(currentSparkVersion),
     libraryDependencies ++= Seq(
       "com.typesafe" % "config" % "1.3.1",
       "joda-time" % "joda-time" % "2.5",
@@ -109,17 +92,19 @@ lazy val mist = project.in(file("."))
       "org.scalatest" %% "scalatest" % "3.0.1" % "it,test",
       "com.typesafe.akka" %% "akka-testkit" % "2.3.12" % "test",
 
+      "com.twitter" %% "chill" % "0.9.2",
+      "com.github.scopt" %% "scopt" % "3.6.0",
+
       "org.mockito" % "mockito-all" % "1.10.19" % "test",
       "org.scalamock" %% "scalamock-scalatest-support" % "3.2.2" % "test",
       "org.testcontainers" % "testcontainers" % "1.2.1" % "it",
 
-      "org.mapdb" % "mapdb" % "1.0.9",
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.1.0",
       "org.apache.hadoop" % "hadoop-client" % "2.6.4" intransitive(),
 
       "org.scalaj" %% "scalaj-http" % "2.3.0",
       "org.apache.kafka" %% "kafka" % "0.10.2.0" exclude("log4j", "log4j") exclude("org.slf4j","slf4j-log4j12"),
-      "org.xerial" % "sqlite-jdbc" % "3.8.11.2",
+      "com.h2database" % "h2" % "1.4.194",
       "org.flywaydb" % "flyway-core" % "4.1.1",
       "org.typelevel" %% "cats" % "0.9.0"
     ),
@@ -128,84 +113,100 @@ lazy val mist = project.in(file("."))
     libraryDependencies ++= miniClusterDependencies,
     dependencyOverrides += "com.typesafe" % "config" % "1.3.1",
 
-    // create type-alises for compatibility between spark versions
-    sourceGenerators in Compile <+= (sourceManaged in Compile, sparkVersion) map { (dir, version) => {
-      val file = dir / "io" / "hydrosphere"/ "mist" / "api" / "package.scala"
-      val libPackage = version match {
-        case versionRegex("1", minor) => "io.hydrosphere.mist.lib.spark1"
-        case _ => "io.hydrosphere.mist.lib.spark2"
-      }
-      val content = s"""package io.hydrosphere.mist
-           |
-           |package object api {
-           |
-           |  type SetupConfiguration = $libPackage.SetupConfiguration
-           |  val SetupConfiguration = $libPackage.SetupConfiguration
-           |
-           |  type ContextSupport = $libPackage.ContextSupport
-           |
-           |  type MistJob = $libPackage.MistJob
-           |
-           |  type MLMistJob = $libPackage.MLMistJob
-           |
-           |  type StreamingSupport = $libPackage.StreamingSupport
-           |
-           |  type SQLSupport = $libPackage.SQLSupport
-           |
-           |  type HiveSupport = $libPackage.HiveSupport
-           |
-           |  type Publisher = $libPackage.Publisher
-           |
-           |  type GlobalPublisher = $libPackage.GlobalPublisher
-           |  val GlobalPublisher = $libPackage.GlobalPublisher
-           |}
-        """.stripMargin
-      IO.write(file,content)
-      Seq(file)
-    }},
-
     parallelExecution in Test := false,
     parallelExecution in IntegrationTest := false,
 
-    fork in (Test, test) := true,
-    fork in (IntegrationTest, test) := true,
-    javaOptions in (IntegrationTest, test) ++= {
-      val jar = outputPath.in(Compile, assembly).value
+    fork in(Test, test) := true,
+    fork in(IntegrationTest, test) := true,
+    fork in(IntegrationTest, testOnly) := true,
+    javaOptions in(IntegrationTest, test) ++= {
+      val mistHome = basicStage.value
       Seq(
         s"-DsparkHome=${sparkLocal.value}",
-        s"-DmistJar=$jar",
+        s"-DmistHome=$mistHome",
         s"-DsparkVersion=${sparkVersion.value}",
         "-Xmx512m"
       )
     },
-    test in IntegrationTest <<= (test in IntegrationTest).dependsOn(assembly),
-    test in IntegrationTest <<= (test in IntegrationTest).dependsOn(sbt.Keys.`package`.in(currentExamples, Compile))
+    javaOptions in(IntegrationTest, testOnly) ++= {
+      val mistHome = basicStage.value
+      Seq(
+        s"-DsparkHome=${sparkLocal.value}",
+        s"-DmistHome=$mistHome",
+        s"-DsparkVersion=${sparkVersion.value}",
+        "-Xmx512m"
+      )
+    }
   ).settings(
     ScoverageSbtPlugin.ScoverageKeys.coverageMinimum := 30,
     ScoverageSbtPlugin.ScoverageKeys.coverageFailOnMinimum := true
+  ).settings(
+    buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sparkVersion),
+    buildInfoPackage := "io.hydrosphere.mist"
+  ).settings(
+    stageDirectory := target.value / s"mist-${version.value}-${sparkVersion.value}",
+    stageActions := {
+      val sparkMajor = if (sparkVersion.value.startsWith("1.")) "1" else "2"
+      
+      Seq(
+        CpFile("bin"),
+        MkDir("configs"),
+        CpFile("configs/logging").to("configs"),
+        CpFile("examples/examples-python").as("examples-python"),
+        CpFile(assembly.value).as("mist.jar"),
+        CpFile(sbt.Keys.`package`.in(currentExamples, Compile).value)
+          .as(s"mist-examples-spark$sparkMajor.jar"),
+        CpFile(Ui.ui.value).as("ui")
+      )
+    }
+
   )
 
-addCommandAlias("testAll", ";mistLibSpark2/test;mist/test;mist/it:test")
+lazy val commandAlias = currentSparkVersion match {
+  case versionRegex("1", minor) => ";mist/test;mist/it:test"
+  case _ => ";mistLib/test;mist/test;mist/it:test"
+}
+addCommandAlias("testAll", commandAlias)
 
-lazy val examplesSpark1 = project.in(file("examples-spark1"))
-  .dependsOn(mistLibSpark1)
+lazy val examplesSpark1 = project.in(file("examples/examples-spark1"))
+  .dependsOn(mistLib)
   .settings(commonSettings: _*)
   .settings(
     name := "mist-examples-spark1",
-    scalaVersion := "2.10.6",
-    libraryDependencies ++= sparkDependencies("1.5.2")
+    libraryDependencies ++= sparkDependencies(currentSparkVersion),
+    autoScalaLibrary := false
   )
 
-lazy val examplesSpark2 = project.in(file("examples-spark2"))
-  .dependsOn(mistLibSpark2)
+lazy val examplesSpark2 = project.in(file("examples/examples-spark2"))
+  .dependsOn(mistLib)
   .settings(commonSettings: _*)
   .settings(
     name := "mist-examples-spark2",
-    scalaVersion := "2.11.8",
-    libraryDependencies ++= sparkDependencies("2.0.0")
+    libraryDependencies ++= sparkDependencies(currentSparkVersion),
+    libraryDependencies += "io.hydrosphere" %% "spark-ml-serving" % "0.1.2",
+    assemblyOption in assembly := (assemblyOption in assembly).value.copy(includeScala = false),
+    assembledMappings in assembly := {
+      // hack - there is no options how to exclude all dependecies that comes
+      // from `.dependsOn(mistLib)`, setup mappings manually - only jobs + spark-ml-serving
+      def isServingLib(f: File): Boolean = {
+        val name = f.getName
+        name.startsWith("spark-ml-serving_2.11")
+      }
+      def isProjectClasses(f: File): Boolean = f.getAbsolutePath.endsWith(baseDirectory.value + "/target/scala-2.11/classes")
+
+      val x = (fullClasspath in assembly).value
+      val filtered = x.seq.filter(v => {
+        val file = v.data
+        isServingLib(file) || isProjectClasses(file)
+      })
+      val s = (streams in assembly).value
+      Assembly.assembleMappings(filtered, Nil, (assemblyOption in assembly).value, s.log)
+    },
+    sbt.Keys.`package` in Compile := (assembly in assembly).value
+
   )
 
-lazy val mistRunSettings = Seq(
+lazy val mistMiscTasks = Seq(
   sparkLocal := {
     val log = streams.value.log
     val version = sparkVersion.value
@@ -221,35 +222,29 @@ lazy val mistRunSettings = Seq(
     }
     sparkDir
   },
+
   mistRun := {
     val log = streams.value.log
-    val jar = outputPath.in(Compile, assembly).value
-
-    val version = sparkVersion.value
     val sparkHome = sparkLocal.value.getAbsolutePath
-    val extraEnv = Seq(
-      "SPARK_HOME" -> sparkHome
-    )
-    val home = baseDirectory.value
 
-    val config = if (version.startsWith("1."))
-      "default_spark1.conf"
-    else
-      "default_spark2.conf"
+    val taskArgs = spaceDelimited("<arg>").parsed
+    val uiEnvs = {
+      val uiPath =
+        taskArgs.grouped(2)
+          .find(parts => parts.size > 1 && parts.head == "--ui-dir")
+          .map(_.last)
 
-    val args = Seq(
-      "bin/mist", "start", "master",
-        "--jar", jar.getAbsolutePath,
-        "--config", s"configs/$config"
-    )
+      uiPath.fold(Seq.empty[(String, String)])(p => Seq("MIST_UI_DIR" -> p))
+    }
+    val extraEnv = Seq("SPARK_HOME" -> sparkHome) ++ uiEnvs
+    val home = basicStage.value
+
+    val args = Seq("bin/mist-master", "start", "--debug", "true")
     val ps = Process(args, Some(home), extraEnv: _*)
     log.info(s"Running mist $ps with env $extraEnv")
 
     ps.!<(StdOutLogger)
-  },
-  //assembly mist and package examples before run
-  mistRun <<= mistRun.dependsOn(assembly),
-  mistRun <<= mistRun.dependsOn(sbt.Keys.`package`.in(currentExamples, Compile))
+  }
 )
 
 lazy val dockerSettings = Seq(
@@ -257,25 +252,9 @@ lazy val dockerSettings = Seq(
     ImageName(s"hydrosphere/mist:${version.value}-${sparkVersion.value}")
   ),
   dockerfile in docker := {
-    val artifact = assembly.value
-    val examples = packageBin.in(currentExamples, Compile).value
     val localSpark = sparkLocal.value
-
     val mistHome = "/usr/share/mist"
-
-    val sparkMajor = sparkVersion.value.split('.').head
-
-    val routerConfig = s"configs/router-examples-spark$sparkMajor.conf"
-    val replacedPaths = scala.io.Source.fromFile(routerConfig).getLines()
-      .map(s => {
-        if (s.startsWith("jar_path"))
-          s"""jar_path = "$mistHome/${examples.name}""""
-        else
-          s
-      }).mkString("\n")
-
-    val dockerRoutes = file("./target/docker_routes.conf")
-    IO.write(dockerRoutes, replacedPaths.getBytes)
+    val distr = dockerStage.value
 
     new Dockerfile {
       from("anapsix/alpine-java:8")
@@ -284,19 +263,7 @@ lazy val dockerSettings = Seq(
       env("MIST_HOME", mistHome)
 
       copy(localSpark, "/usr/share/spark")
-
-      run("mkdir", "-p", s"$mistHome")
-      run("mkdir", "-p", s"$mistHome/configs")
-
-      copy(file("bin"), s"$mistHome/bin")
-
-      copy(file("configs/docker.conf"), s"$mistHome/configs/docker.conf")
-      copy(dockerRoutes, s"$mistHome/configs/router-examples.conf")
-
-      add(artifact, s"$mistHome/mist-assembly.jar")
-      add(examples, s"$mistHome/${examples.name}")
-
-      copy(file("examples-python"), mistHome + "/examples-python")
+      copy(distr, mistHome)
 
       copy(file("docker-entrypoint.sh"), "/")
       run("chmod", "+x", "/docker-entrypoint.sh")
@@ -304,7 +271,6 @@ lazy val dockerSettings = Seq(
       run("apk", "update")
       run("apk", "add", "python", "curl", "jq", "coreutils")
 
-      expose(2003)
       workDir(mistHome)
       entryPoint("/docker-entrypoint.sh")
     }
@@ -343,7 +309,7 @@ lazy val miniClusterDependencies =
   Seq(
     "org.apache.hadoop" % "hadoop-hdfs" % "2.6.4" % "test" classifier "" classifier "tests",
     "org.apache.hadoop" % "hadoop-common" % "2.6.4" % "test" classifier "" classifier "tests",
-    "org.apache.hadoop" % "hadoop-client" % "2.6.4" % "test" classifier "" classifier "tests" ,
+    "org.apache.hadoop" % "hadoop-client" % "2.6.4" % "test" classifier "" classifier "tests",
     "org.apache.hadoop" % "hadoop-mapreduce-client-jobclient" % "2.6.4" % "test" classifier "" classifier "tests",
     "org.apache.hadoop" % "hadoop-yarn-server-tests" % "2.6.4" % "test" classifier "" classifier "tests",
     "org.apache.hadoop" % "hadoop-yarn-server-web-proxy" % "2.6.4" % "test" classifier "" classifier "tests",
@@ -354,13 +320,17 @@ lazy val commonAssemblySettings = Seq(
   mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) => {
     case m if m.toLowerCase.endsWith("manifest.mf") => MergeStrategy.discard
     case m if m.startsWith("META-INF") => MergeStrategy.discard
-    case PathList("javax", "servlet", xs @ _*) => MergeStrategy.first
-    case PathList("org", "apache", xs @ _*) => MergeStrategy.first
-    case PathList("org", "jboss", xs @ _*) => MergeStrategy.first
-    case "about.html"  => MergeStrategy.rename
+    case PathList("javax", "servlet", xs@_*) => MergeStrategy.first
+    case PathList("org", "apache", xs@_*) => MergeStrategy.first
+    case PathList("org", "jboss", xs@_*) => MergeStrategy.first
+    case "about.html" => MergeStrategy.rename
     case "reference.conf" => MergeStrategy.concat
-    case PathList("org", "datanucleus", xs @ _*) => MergeStrategy.discard
+    case PathList("org", "datanucleus", xs@_*) => MergeStrategy.discard
     case _ => MergeStrategy.first
-  }},
+  }
+  },
+  assemblyShadeRules in assembly := Seq(
+      ShadeRule.rename("scopt.**" -> "shaded.@0").inAll
+  ),
   test in assembly := {}
 )

@@ -2,169 +2,199 @@ package io.hydrosphere.mist.master
 
 import java.util.UUID
 
-import akka.actor._
-import akka.pattern.ask
-import akka.util.Timeout
-import io.hydrosphere.mist.jobs.JobDetails.Source
-import io.hydrosphere.mist.jobs._
-import io.hydrosphere.mist.Messages.WorkerMessages._
-import io.hydrosphere.mist.Messages.JobMessages._
-import io.hydrosphere.mist.Messages.StatusMessages
-import io.hydrosphere.mist.Messages.StatusMessages.{FailedEvent, Register, RunningJobs, UpdateStatusEvent}
+import cats.data._
+import cats.implicits._
+import io.hydrosphere.mist.api.StreamingSupport
 import io.hydrosphere.mist.jobs.JobDetails.Source.Async
-import io.hydrosphere.mist.master.interfaces.async.AsyncInterface.Provider
-import io.hydrosphere.mist.master.interfaces.async.AsyncPublisher
+import io.hydrosphere.mist.jobs._
+import io.hydrosphere.mist.jobs.jar.JobClass
+import io.hydrosphere.mist.master.data.ContextsStorage
+import io.hydrosphere.mist.master.data.EndpointsStorage
+import io.hydrosphere.mist.master.logging.LogStorageMappings
+import io.hydrosphere.mist.master.models.RunMode.{ExclusiveContext, Shared}
+import io.hydrosphere.mist.master.models._
 import io.hydrosphere.mist.utils.Logger
-import io.hydrosphere.mist.utils.TypeAlias._
 
 import scala.concurrent.{Future, Promise}
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
+import scala.concurrent.ExecutionContext.Implicits.global
 
 class MasterService(
-  workerManager: ActorRef,
-  statusService: ActorRef,
-  jobRoutes: JobRoutes
+  val jobService: JobService,
+  val endpoints: EndpointsStorage,
+  val contexts: ContextsStorage,
+  val logStorageMappings: LogStorageMappings
 ) extends Logger {
 
-  import scala.concurrent.ExecutionContext.Implicits.global
-  import scala.concurrent.duration._
-
-  implicit val timeout = Timeout(10.second)
-
-  def activeJobs(): Future[List[JobDetails]] = {
-    val future = statusService ? StatusMessages.RunningJobs
-    future.mapTo[List[JobDetails]]
+  def runJob(
+    req: EndpointStartRequest,
+    source: JobDetails.Source
+  ): Future[Option[JobStartResponse]] = {
+    val out = for {
+      executionInfo <- OptionT(runJobRaw(req, source))
+    } yield JobStartResponse(executionInfo.request.id)
+    out.value
   }
 
-  def workers(): Future[List[WorkerLink]] = {
-    val f = workerManager ? GetWorkers
-    f.mapTo[List[WorkerLink]]
-  }
-
-  def stopAllWorkers(): Future[Unit] = {
-    val f = workerManager ? StopAllWorkers
-    f.map(_ => ())
-  }
-
-  def stopJob(namespace: String, runId: String): Future[Unit] = {
-    val f = workerManager ? WorkerCommand(namespace, CancelJobRequest(runId))
-    f.map(_ => ())
-  }
-
-  def stopWorker(id: String): Future[String] = {
-    workerManager ! StopWorker(id)
-    Future.successful(id)
-  }
-
-  def listRoutesInfo(): Seq[JobInfo] = jobRoutes.listInfos()
-  def routeDefinitions(): Seq[JobDefinition] = jobRoutes.listDefinition()
-
-  def startJob(
-    routeId: String,
-    action: Action,
-    arguments: JobParameters,
+  def forceJobRun(
+    req: EndpointStartRequest,
     source: JobDetails.Source,
-    externalId: Option[String]
-  ): Future[JobResult] = {
-    buildParams(routeId, action, arguments, externalId) match {
-      case Some(execParams) =>
-        val request = toRequest(execParams)
+    action: Action = Action.Execute
+  ): Future[Option[JobResult]] = {
+    val promise = Promise[Option[JobResult]]
+    runJobRaw(req, source, action).map({
+      case Some(info) => info.promise.future.onComplete {
+        case Success(r) =>
+          promise.success(Some(JobResult.success(r)))
+        case Failure(e) =>
+          promise.success(Some(JobResult.failure(e.getMessage)))
+      }
+      case None => promise.success(None)
+    }).onFailure({
+      case e: Throwable => promise.failure(e)
+    })
 
-        statusService ! Register(request.id, execParams, source)
+    promise.future
+  }
 
-        val promise = Promise[JobResult]
-        // that timeout only for obtaining execution info
-        implicit val timeout = Timeout(30.seconds)
+  def devRun(
+    req: DevJobStartRequest,
+    source: JobDetails.Source,
+    action: Action = Action.Execute
+  ): Future[ExecutionInfo] = {
 
-        workerManager.ask(WorkerCommand(execParams.namespace, request))
-          .mapTo[ExecutionInfo]
-          .flatMap(_.promise.future).onComplete({
-          case Success(r) =>
-            promise.success(JobResult.success(r, execParams))
-          case Failure(e) =>
-            promise.success(JobResult.failure(e.getMessage, execParams))
-        })
-        promise.future
+    val endpoint = EndpointConfig(
+      name = req.fakeName,
+      path = req.path,
+      className = req.className,
+      defaultContext = req.context
+    )
 
-      case None =>
-        Future.failed(new RuntimeException(s"Job with $routeId not found"))
+    def getInfo(endpoint: EndpointConfig): FullEndpointInfo =
+      loadEndpointInfo(endpoint) match {
+        case Success(fullInfo) => fullInfo
+        case Failure(e) => throw e
+      }
+
+    for {
+      context       <- contexts.getOrDefault(req.context)
+      fullInfo      =  getInfo(endpoint)
+      _             <- validate(fullInfo.info, req.parameters, action)
+      runMode       =  selectRunMode(context, req.workerId, fullInfo)
+      executionInfo <- jobService.startJob(JobStartRequest(
+        id = UUID.randomUUID().node().toString,
+        endpoint = endpoint,
+        context = context,
+        parameters = req.parameters,
+        runMode = runMode,
+        source = source,
+        externalId = req.externalId,
+        action = action
+      ))
+    } yield executionInfo
+  }
+
+  private def selectRunMode(config: ContextConfig, workerId: Option[String], fullInfo: FullEndpointInfo): RunMode = {
+    def isStreamingJob(jobClass: JobClass) =
+      jobClass.supportedClasses().contains(classOf[StreamingSupport])
+
+    def workerModeFromContextConfig = config.workerMode match {
+      case "exclusive" => ExclusiveContext(workerId)
+      case "shared" => Shared
+      case _ =>
+        throw new IllegalArgumentException(s"unknown worker run mode ${config.workerMode} for context ${config.name}")
+    }
+
+    fullInfo.info match {
+      case JvmJobInfo(jobClass) if isStreamingJob(jobClass) =>
+        ExclusiveContext(workerId)
+      case _ => workerModeFromContextConfig
     }
   }
 
-  def startJob(r: JobExecutionRequest, source: JobDetails.Source): Future[JobResult] = {
-    import r._
-    startJob(jobId, action, parameters, source, r.externalId)
-  }
+  def recoverJobs(): Future[Unit] = {
 
-  private def buildParams(
-    routeId: String,
-    action: Action,
-    arguments: JobParameters,
-    externalId: Option[String]
-  ): Option[JobExecutionParams] = {
-    jobRoutes.getDefinition(routeId).map(d => {
-      JobExecutionParams.fromDefinition(
-        definition = d,
-        action = action,
-        parameters = arguments,
-        externalId = externalId
-      )
-    })
-  }
+    def restartJob(job: JobDetails): Future[Unit] = {
+      val req = EndpointStartRequest(job.endpoint, job.params.arguments, job.externalId, id = job.jobId)
+      runJob(req, job.source).map(_ => ())
+    }
 
-  private def toRequest(execParams: JobExecutionParams): RunJobRequest = {
-    RunJobRequest(
-      id = UUID.randomUUID().toString,
-      JobParams(
-        filePath = execParams.path,
-        className = execParams.className,
-        arguments = execParams.parameters,
-        action = execParams.action
-      )
-    )
+    def failOrRestart(d: JobDetails): Future[Unit] = d.source match {
+      case a: Async => restartJob(d)
+      case _ =>
+        logger.info(s"Mark job $d as failed")
+        jobService.markJobFailed(d.jobId, "Worker was stopped")
+    }
 
-  }
-
-  def recoverJobs(publishers: Map[Provider, ActorRef]): Unit = {
-    activeJobs().onSuccess({ case jobs =>
-      jobs.foreach(details => {
-        details.source match {
-          case a: Async if publishers.get(a.provider).isDefined =>
-            publishers.get(a.provider).foreach(ref => {
-              logger.info(s"Job $details is restarted")
-              restartAsync(details, ref)
-            })
-          case _ =>
-            logger.info(s"Mark job $details as aborted")
-            statusService ! FailedEvent(
-              details.jobId,
-              System.currentTimeMillis(),
-              "Worker was stopped"
-            )
-        }
+    jobService.activeJobs().flatMap(notCompleted => {
+      val processed = notCompleted.map(d => failOrRestart(d).recoverWith {
+        case e: Throwable =>
+          logger.error(s"Error occurred during recovering ${d.jobId}", e)
+          Future.successful(())
       })
-      logger.info("Job recovery done")
-    })
+      Future.sequence(processed)
+    }).map(_ => ())
   }
 
-  private def restartAsync(job: JobDetails, publisher: ActorRef): Future[JobResult] = {
-    val future = startJob(
-      //TODO: get!
-      job.configuration.route.get,
-      job.configuration.action,
-      job.configuration.parameters,
-      job.source,
-      job.configuration.externalId)
+  private def runJobRaw(
+    req: EndpointStartRequest,
+    source: JobDetails.Source,
+    action: Action = Action.Execute): Future[Option[ExecutionInfo]] = {
+    val out = for {
+      fullInfo       <- OptionT(endpoints.getFullInfo(req.endpointId))
+      endpoint       =  fullInfo.config
+      jobInfo        =  fullInfo.info
+      _              <- OptionT.liftF(validate(jobInfo, req.parameters, action))
+      context        <- OptionT.liftF(selectContext(req, endpoint))
+      runMode        =  selectRunMode(context, req.runSettings.workerId, fullInfo)
+      jobStartReq    =  JobStartRequest(
+        id = req.id,
+        endpoint = endpoint,
+        context = context,
+        parameters = req.parameters,
+        runMode = runMode,
+        source = source,
+        externalId = req.externalId,
+        action = action
+      )
+      executionInfo  <- OptionT.liftF(jobService.startJob(jobStartReq))
+    } yield executionInfo
 
-    future.onComplete({
-      case Success(jobResult) => publisher ! jobResult
-      case Failure(e) =>
-        logger.error(s"Job $job execution failed", e)
-        val msg = s"Job execution failed for $job. Error message ${e.getMessage}"
-        publisher ! msg
-    })
+    out.value
+  }
 
-    future
+  private def selectContext(req: EndpointStartRequest, endpoint: EndpointConfig): Future[ContextConfig] = {
+    val name = req.runSettings.contextId.getOrElse(endpoint.defaultContext)
+    contexts.getOrDefault(name)
+  }
+
+  def validate(jobInfo: JobInfo, params: Map[String, Any], action: Action): Future[Unit] = {
+    jobInfo.validateAction(params, action) match {
+      case Left(e) => Future.failed(e)
+      case Right(_) => Future.successful(())
+    }
+  }
+
+  def loadEndpointInfo(e: EndpointConfig): Try[FullEndpointInfo] = {
+    import e._
+    JobInfo.load(name, path, className).map(i => FullEndpointInfo(e, i))
+  }
+
+  private def toFullInfo(e: EndpointConfig): Option[FullEndpointInfo] = {
+    loadEndpointInfo(e) match {
+      case Success(fullInfo) => Some(fullInfo)
+      case Failure(err) =>
+        logger.error("Invalid route configuration", err)
+        None
+    }
+  }
+
+  def endpointsInfo: Future[Seq[FullEndpointInfo]] = {
+    endpoints.all.map(_.flatMap(toFullInfo))
+  }
+
+  def endpointInfo(id: String): Future[Option[FullEndpointInfo]] = {
+    endpoints.get(id).map(_.flatMap(toFullInfo))
   }
 
 }

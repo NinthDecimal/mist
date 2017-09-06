@@ -8,14 +8,13 @@ import io.hydrosphere.mist.jobs.Action
 import scala.util.{Failure, Success, Try}
 import scala.reflect.runtime.universe._
 
-class JobsLoader(classLoader: ClassLoader) {
+class JobsLoader(val classLoader: ClassLoader) {
 
   def loadJobClass(className: String): Try[JobClass] = {
     loadClass(className).map(clz => {
       val instance = new JobClass(
         clazz = clz,
         execute = loadJobInstance(clz, Action.Execute),
-        train = loadJobInstance(clz, Action.Train),
         serve = loadJobInstance(clz, Action.Serve)
       )
       instance
@@ -48,7 +47,6 @@ class JobsLoader(classLoader: ClassLoader) {
   private def methodNameByAction(action: Action): String = action match {
     case Action.Execute => "execute"
     case Action.Serve => "serve"
-    case Action.Train => "train"
   }
 
   private def loadClass(name: String): Try[Class[_]] = {

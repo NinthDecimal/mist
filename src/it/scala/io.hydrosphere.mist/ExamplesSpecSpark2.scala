@@ -6,8 +6,6 @@ import org.scalatest.{FunSpec, Matchers}
 
 class ExamplesSpecSpark2 extends FunSpec with MistItTest with Matchers {
 
-  override val configPath: String = "examples-spark2/integration.conf"
-
   val savePathDir = "./target/it-test/ml-data"
 
   if (isSpark2) {
@@ -15,16 +13,16 @@ class ExamplesSpecSpark2 extends FunSpec with MistItTest with Matchers {
 
     it("run simple context") {
       val result = interface.runJob("simple-context",
-        Map(
           "numbers" -> List(1, 2, 3),
-          "multiplier" -> 2))
+          "multiplier" -> 2
+      )
 
       result.success shouldBe true
     }
 
     it("run binarizer") {
       val modelPath = savePathForJob("binarizer")
-      val trainR = interface.train(
+      val trainR = interface.runJob(
         "binarizer",
         "savePath" -> modelPath
       )

@@ -1,6 +1,7 @@
 package io.hydrosphere.mist
 
 import io.hydrosphere.mist.jobs.JobResult
+import io.hydrosphere.mist.master.interfaces.JsonCodecs
 import org.scalatest._
 import scala.sys.process._
 
@@ -11,32 +12,40 @@ trait MistRunner {
     case None => throw new RuntimeException(s"Property $name is not set")
   }
 
+  val mistHome = getProperty("mistHome")
   val sparkHome = getProperty("sparkHome")
-  val jar = getProperty("mistJar")
   val sparkVersion = getProperty("sparkVersion")
 
-  def runMist(configPath: String): Process = {
+  def runMist(
+    overrideConf: Option[String],
+    overrideRouter: Option[String]
+  ): Process = {
 
-    val reallyConfigPath = getClass.getClassLoader.getResource(configPath).getPath
-    val args = Seq(
-      "./bin/mist", "start", "master",
-      "--jar", jar,
-      "--config", reallyConfigPath)
+    def fromResource(path: String): String =
+      getClass.getClassLoader.getResource(path).getPath
+
+    def optArg(key: String, value: Option[String]): Seq[String] =
+      value.map(v => Seq(key, v)).getOrElse(Seq.empty)
+
+    val configArg = optArg("--config", overrideConf.map(fromResource))
+    val routerArg = optArg("--router-config", overrideRouter.map(fromResource))
+    val args = Seq(s"$mistHome/bin/mist-master", "start") ++ configArg ++ routerArg
 
     val env = sys.env.toSeq :+ ("SPARK_HOME" -> sparkHome)
-    val ps = Process(args, None, env: _*).run(new ProcessLogger {
-      override def buffer[T](f: => T): T = f
-
-      override def out(s: => String): Unit = ()
-
-      override def err(s: => String): Unit = ()
-    })
+//    val ps = Process(args, None, env: _*).run(new ProcessLogger {
+//      override def buffer[T](f: => T): T = f
+//
+//      override def out(s: => String): Unit = ()
+//
+//      override def err(s: => String): Unit = ()
+//    })
+    val ps = Process(args, None, env: _*).run()
     Thread.sleep(5000)
     ps
   }
 
   def killMist(): Unit ={
-    Process("./bin/mist stop", None, "SPARK_HOME" -> sparkHome).run(false).exitValue()
+    Process(s"$mistHome/bin/mist-master stop").run(false).exitValue()
   }
 }
 
@@ -44,11 +53,13 @@ object MistRunner extends MistRunner
 
 trait MistItTest extends BeforeAndAfterAll with MistRunner { self: Suite =>
 
-  val configPath: String
+  val overrideConf: Option[String] = None
+  val overrideRouter: Option[String] = None
+
   private var ps: Process = null
 
   override def beforeAll {
-    ps = runMist(configPath)
+    ps = runMist(overrideConf, overrideRouter)
   }
 
   override def afterAll: Unit = {
@@ -73,42 +84,32 @@ trait MistItTest extends BeforeAndAfterAll with MistRunner { self: Suite =>
     runOnlyIf(isSpark1, "SKIP TEST - ONLY FOR SPARK1")(body)
 }
 
-case class MistHttpInterface(host: String, port: Int) {
+case class MistHttpInterface(
+  host: String,
+  port: Int,
+  timeout: Int = 120
+) {
 
-  import io.hydrosphere.mist.master.interfaces.http.JsonCodecs._
+  import JsonCodecs._
   import spray.json.pimpString
   import spray.json._
   import scalaj.http.Http
 
-  def runJob(routeId: String, params: Map[String, Any], timeout: Int = 30): JobResult =
-    callApi(routeId, params, Execute, timeout)
-
   def runJob(routeId: String, params: (String, Any)*): JobResult =
-    callApi(routeId, params.toMap, Execute, 60)
-
-  def train(routeId: String, params: Map[String, Any], timeout: Int = 30): JobResult =
-    callApi(routeId, params, Train, timeout)
-
-  def train(routeId: String, params: (String, Any)*): JobResult =
-    callApi(routeId, params.toMap, Train, 60)
-
-  def serve(routeId: String, params: Map[String, Any], timeout: Int = 30): JobResult =
-    callApi(routeId, params, Serve, timeout)
+    callV2Api(routeId, params.toMap)
 
   def serve(routeId: String, params: (String, Any)*): JobResult =
-    callApi(routeId, params.toMap, Serve, 60)
+    callOldApi(routeId, params.toMap, Serve)
 
-  private def callApi(
+  private def callOldApi(
     routeId: String,
     params: Map[String, Any],
-    action: ActionType,
-    timeout: Int = 30): JobResult = {
+    action: ActionType): JobResult = {
 
     val millis = timeout * 1000
 
     val jobUrl = s"http://$host:$port/api/$routeId"
     val url = action match {
-      case Train => jobUrl + "?train=true"
       case Serve => jobUrl + "?serve=true"
       case Execute => jobUrl
     }
@@ -125,9 +126,28 @@ case class MistHttpInterface(host: String, port: Int) {
       throw new RuntimeException(s"Job failed body ${resp.body}")
   }
 
+  def callV2Api(
+    endpointId: String,
+    params: Map[String, Any]
+  ): JobResult = {
+
+    val millis = timeout * 1000
+    val url = s"http://$host:$port/v2/api/endpoints/$endpointId/jobs?force=true"
+
+    val req = Http(url)
+      .timeout(millis, millis)
+      .header("Content-Type", "application/json")
+      .postData(params.toJson)
+
+    val resp = req.asString
+    if (resp.code == 200)
+      resp.body.parseJson.convertTo[JobResult]
+    else
+      throw new RuntimeException(s"Job failed body ${resp.body}")
+  }
+
   sealed trait ActionType
   case object Execute extends ActionType
-  case object Train extends ActionType
   case object Serve extends ActionType
 }
 
