@@ -3,13 +3,16 @@ docker-build-opt := --pull --force-rm
 name := pca-mist
 
 tag := mist-0.0.27
-pca-python-ver := 0.4.27-pca-581-6
+	 
+	 
+remove:
+	 dockers-to-delete := $(docker images | grep ${repo}/nined/${name}:${tag} | awk '{ print $3 }') \
+     docker rmi dockers-to-delete
 
 build:
-	docker build ${docker-build-opt} -t "${repo}/nined/${name}:${tag}" \
-	    --build-arg PCA_PYTHON_VER="${pca-python-ver}" \
-		.
+	 docker build ${docker-build-opt} -t "${repo}/nined/${name}:${tag}" \
+	 .
 
 push:
-	docker push "${repo}/nined/${name}:${tag}"
+	 docker push "${repo}/nined/${name}:${tag}"
 	

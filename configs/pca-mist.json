@@ -37,13 +37,28 @@
                     "containerPath": "/usr/share/external_configs",
                     "hostPath": "/nethome/lblokhin/git/mist_latest/mist/configs",
                     "mode": "RW"
+                },
+                {
+                    "containerPath": "/opt/host_etc",
+                    "hostPath": "/etc",
+                    "mode": "RO"
+                },
+                {
+                    "containerPath": "/opt/mapr",
+                    "hostPath": "/opt/mapr",
+                    "mode": "RO"
+                },
+                {
+                    "containerPath": "/tmp",
+                    "hostPath": "/tmp",
+                    "mode": "RW"
                 }
             ]
         },
         "resources":
         {
             "cpus": 4,
-            "memoryMb": 9100,
+            "memoryMb": 16000,
             "numPorts": 0
         },
         "env":
@@ -57,9 +72,9 @@
             "CELERY_TRACK_STARTED": "1",
             "CELERY_SEND_EVENTS": "1",
             "CELERY_SEND_TASK_SENT_EVENT": "1",
-            "SPARK_HOME": "/opt/spark/current",
             "MIST_HOME": "/usr/share/mist/target/mist-0.13.1-2.1.0",
-            "SPARK_VERSION": "2.1.0"
+            "SPARK_VERSION": "2.1.0",
+            "PCA_HDFS_PATH": "maprfs://mapr5/data/pca/dev"
         }
     }
 }
