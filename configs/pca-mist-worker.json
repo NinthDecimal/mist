@@ -73,7 +73,7 @@
             "CELERY_TRACK_STARTED": "1",
             "CELERY_SEND_EVENTS": "1",
             "CELERY_SEND_TASK_SENT_EVENT": "1",
-            "MIST_HOME": "/usr/share/mist/target/mist-0.13.1-2.1.0",
+            "MIST_HOME": "/usr/share/mist/target/mist-0.13.2-2.1.0",
             "SPARK_VERSION": "2.1.0",
             "PCA_HDFS_PATH": "maprfs://mapr5/data/pca/dev"
         }
