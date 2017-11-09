@@ -2,15 +2,13 @@ repo := docker.jiwiredev.com
 docker-build-opt := --pull --force-rm
 name := pca-mist
 
-tag := mist-0.0.27
+tag := mist-0.0.28
+pca-scala-ver := 1.26
 	 
 	 
-remove:
-	 dockers-to-delete := $(docker images | grep ${repo}/nined/${name}:${tag} | awk '{ print $3 }') \
-     docker rmi dockers-to-delete
-
 build:
 	 docker build ${docker-build-opt} -t "${repo}/nined/${name}:${tag}" \
+	 --build-arg PCA_SCALA_VER="${pca-scala-ver}" \
 	 .
 
 push:

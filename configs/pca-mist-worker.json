@@ -1,7 +1,7 @@
 {
     "owners": ["lblokhin@ninthdecimal.com"],
     "requestType": "WORKER",
-    "id": "dev-pca-mist-worker",
+    "id": "mist-worker",
     "requiredSlaveAttributes":
     {
         "cluster": "compute_2_0",
@@ -21,7 +21,7 @@
             "docker":
             {
                 "forcePullImage": true,
-                "image": "docker.jiwiredev.com/nined/pca-mist:mist-0.0.27",
+                "image": "docker.jiwiredev.com/nined/pca-mist:mist-0.0.28",
                 "network": "HOST",
                 "parameters": {"ipc": "host"},
                 "dockerParameters": [{"key": "ipc", "value": "host"}],
@@ -30,14 +30,9 @@
             "volumes":
             [
                 {
-                    "containerPath": "/usr/share/external_jars",
+                    "containerPath": "/usr/share/external_jars/",
                     "hostPath": "/nethome/lblokhin/jars",
                     "mode": "RO"
-                },
-                {
-                    "containerPath": "/usr/share/external_configs",
-                    "hostPath": "/nethome/lblokhin/git/mist_latest/mist/configs",
-                    "mode": "RW"
                 },
                 {
                     "containerPath": "/opt/host_etc",
@@ -58,8 +53,8 @@
         },
         "resources":
         {
-            "cpus": 4,
-            "memoryMb": 9100,
+            "cpus": 8,
+            "memoryMb": 8192,
             "numPorts": 0
         },
         "env":
@@ -69,7 +64,6 @@
             "JOIN_AD": "0",
             "HOMEDIRS": "0",
             "USERNAME": "pca",
-            "BROKER_URL": "amqp://guest:guest@rabbitmq.9dev.io:5672/pca-dev",
             "CELERY_TRACK_STARTED": "1",
             "CELERY_SEND_EVENTS": "1",
             "CELERY_SEND_TASK_SENT_EVENT": "1",

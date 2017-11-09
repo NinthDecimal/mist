@@ -25,16 +25,27 @@ RUN echo "Update 2017-06-27" \
  && apt-get -y autoremove \
  && apt-get -y clean all \
  && apt-get -y autoclean all \
+ && pip install --upgrade pip \
  && rm -fr /tmp/* /var/tmp/*
  
-RUN pip install -i http://pypi.jiwiredev.com/simple --trusted-host pypi.jiwiredev.com --user nd-singularity
+RUN pip install --extra-index-url http://pypi.jiwiredev.com/simple --trusted-host pypi.jiwiredev.com --user nd-singularity
 
 RUN /usr/local/bin/spark-dist
 
 RUN confd -onetime -backend etcd -prefix=/${OPENV} -log-level=${LOG_LEVEL} -confdir=/etc/confd/spark \
     . /etc/spark/spark-env.sh 
 
- 
+ARG PCA_SCALA_VER
+ENV PCA_SCALA_HOME /data/apps/pca-scala/releases/$PCA_SCALA_VER
+
+RUN cd /tmp \
+ && wget -c http://eng-01.jiwiredev.com:5050/nexus/content/repositories/jiwire/com/jiwire/pca/pca-scala/$PCA_SCALA_VER/pca-scala-$PCA_SCALA_VER.jar \
+ && mkdir -p $PCA_SCALA_HOME \
+ && mv /tmp/pca-scala-$PCA_SCALA_VER.jar $PCA_SCALA_HOME/ \
+ && ln -s $PCA_SCALA_HOME/pca-scala-$PCA_SCALA_VER.jar $PCA_SCALA_HOME/pca-scala.jar \
+ && ln -s $PCA_SCALA_HOME /data/apps/pca-scala/current
+
+
 RUN cd ${MIST_HOME} && \
     ./sbt/sbt -DsparkVersion=2.1.0 mist/basicStage </dev/null && \
     chmod +x /docker-entrypoint.sh
