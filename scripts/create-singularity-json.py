@@ -18,9 +18,11 @@ def exclusive(singularity_config, hash_id, envoirment):
     
 
 def main():
-    template_json_path = "%s/configs/pca-mist-worker.json" % os.environ['MIST_HOME']
+    
     hash_id = sys.argv[1]
     envoirment = sys.argv[2]
+    
+    template_json_path = "%s/configs/%s/pca-mist-worker.json" % (os.environ['MIST_HOME'], envoirment)
     
     with open(template_json_path) as template:
         singularity_config = json.load(template)

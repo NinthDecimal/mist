@@ -21,7 +21,7 @@
             "docker":
             {
                 "forcePullImage": true,
-                "image": "docker.jiwiredev.com/nined/pca-mist:mist-0.0.28",
+                "image": "docker.jiwiredev.com/nined/pca-mist-qa:0.13.2",
                 "network": "HOST",
                 "parameters": {"ipc": "host"},
                 "dockerParameters": [{"key": "ipc", "value": "host"}],
