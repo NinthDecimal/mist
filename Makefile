@@ -50,3 +50,5 @@ build-prod:
 
 push-prod:
 	 docker push "${repo}/nined/${prod-name}:${tag}"
+
+#make build-dev push-dev build-stage push-stage build-qa push-qa build-integration push-integration build-prod push-prod

@@ -54,7 +54,7 @@
         "resources":
         {
             "cpus": 8,
-            "memoryMb": 8192,
+            "memoryMb": 16384,
             "numPorts": 0
         },
         "env":
