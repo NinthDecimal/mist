@@ -12,7 +12,7 @@ def exclusive(singularity_config, hash_id, envoirment):
     singularity_config['deploy']['env']['MIST_WORKER_RUN_OPTIONS'] = os.environ['MIST_WORKER_RUN_OPTIONS']
     singularity_config['deploy']['env']['MIST_MASTER_IP'] = os.environ['MIST_MASTER_IP']
 
-    singularity_config['id'] = singularity_config['id'] + '-' + envoirment + '-' + hash_id 
+    singularity_config['id'] = envoirment + '-' + singularity_config['id'] + '-' + hash_id 
     
     return singularity_config
     
@@ -30,7 +30,11 @@ def main():
     
     print exclusive_json
     
-    exclusive_json_path = "%s/configs/mist-worker-%s-%s.json" % (os.environ['MIST_HOME'], envoirment, hash_id)
+    exclusive_json_path = "%s/configs/%s-mist-worker-%s.json" % (os.environ['MIST_HOME'], envoirment, hash_id)
+    
+    if os.path.isfile(exclusive_json_path):
+        os.remove(exclusive_json_path)
+        
     with open(exclusive_json_path, "wb") as f:
         f.write(json.dumps(exclusive_json,
                       indent=4, sort_keys=True,
