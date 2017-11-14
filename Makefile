@@ -7,8 +7,8 @@ qa-name := pca-mist-qa
 integration-name := pca-mist-integration
 prod-name := pca-mist-prod
 
-tag := 0.13.2
-pca-scala-ver := 1.30
+tag := v0.13.2-758
+pca-scala-ver := 1.31
 	 
 	 
 build-dev:
