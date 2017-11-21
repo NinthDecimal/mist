@@ -21,7 +21,7 @@
             "docker":
             {
                 "forcePullImage": true,
-                "image": "docker.jiwiredev.com/nined/pca-mist-qa:v0.13.2-758",
+                "image": "docker.jiwiredev.com/nined/pca-mist-qa:v0.13.2-1.34",
                 "network": "HOST",
                 "parameters": {"ipc": "host"},
                 "dockerParameters": [{"key": "ipc", "value": "host"}],
@@ -47,6 +47,11 @@
                 {
                     "containerPath": "/tmp",
                     "hostPath": "/tmp",
+                    "mode": "RW"
+                },
+                {
+                    "containerPath": "/net/mapr-nfs/mapr/mapr5/data/pca/qa",
+                    "hostPath": "/net/mapr-nfs/mapr/mapr5/data/pca/qa",
                     "mode": "RW"
                 }
             ]
