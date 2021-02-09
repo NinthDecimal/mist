@@ -15,7 +15,7 @@ object Ui {
 
   lazy val settings = Seq(
     uiUrl := { (s: String) => s"https://github.com/Hydrospheredata/mist-ui/releases/download/v$s/mist-ui-$s.tar.gz" },
-    uiVersion := "1.1.4",
+    uiVersion := "2.2.1",
     uiCheckoutDir := "ui_local",
     ui := {
       val local = baseDirectory.value / uiCheckoutDir.value
@@ -24,25 +24,13 @@ object Ui {
       val v = uiVersion.value
       val target = local / s"ui-$v"
       if (!target.exists()) {
-        val link = url(uiUrl.value(v))
+        val link = uiUrl.value(v)
         val targetF = local/ s"ui-$v.tar.gz"
-        download(link, targetF)
+        Downloader.download(link, targetF)
         Tar.extractTarGz(targetF, target)
       }
       target / "dist"
     }
   )
 
-  def download(url: URL, to: File): Unit = {
-    val conn = url.openConnection().asInstanceOf[HttpURLConnection]
-    conn.connect()
-    (conn.getResponseCode: @switch) match {
-      case 301 | 302 =>
-        val redirect  = conn.getHeaderField("Location")
-        download(sbt.url(redirect), to)
-      case 200 =>
-        IO.download(url, to)
-      case x => throw new RuntimeException(s"Resource at $url response code is $x")
-    }
-  }
 }

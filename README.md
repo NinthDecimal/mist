@@ -1,91 +1,31 @@
-[![Build Status](https://jenkins.hydrosphere.io/buildStatus/icon?job=hydrosphere/mist/master)](https://jenkins.hydrosphere.io/job/hydrosphere/job/mist/job/master/)
+[![Build Status](https://ci.hydrosphere.io/buildStatus/icon?job=hydrosphere.io/mist/master)](https://ci.hydrosphere.io/job/hydrosphere.io/job/mist/job/master/)
 [![Build Status](https://travis-ci.org/Hydrospheredata/mist.svg?branch=master)](https://travis-ci.org/Hydrospheredata)
-[![GitHub version](https://badge.fury.io/gh/hydrospheredata%2Fmist.svg)](https://badge.fury.io/gh/hydrospheredata%2Fmist) [![Maven Central](https://maven-badges.herokuapp.com/maven-central/io.hydrosphere/mist-lib-spark2_2.11/badge.svg)](https://maven-badges.herokuapp.com/maven-central/io.hydrosphere/mist-lib-spark2_2.11/)
+[![Maven Central](https://maven-badges.herokuapp.com/maven-central/io.hydrosphere/mist-lib_2.11/badge.svg)](https://maven-badges.herokuapp.com/maven-central/io.hydrosphere/mist-lib_2.11/)
 [![Docker Hub Pulls](https://img.shields.io/docker/pulls/hydrosphere/mist.svg)](https://img.shields.io/docker/pulls/hydrosphere/mist.svg)
 # Hydrosphere Mist
 
-[Hydrosphere](http://hydrosphere.io) Mist is a Multi-tenancy and Multi-user Spark server.
+[![Join the chat at https://gitter.im/Hydrospheredata/mist](https://badges.gitter.im/Hydrospheredata/mist.svg)](https://gitter.im/Hydrospheredata/mist?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
-Main features:
-* **Serverless**. Get abstracted from resource isolation, sharing and auto-scaling. 
+[Hydrosphere](http://hydrosphere.io) Mist is a serverless proxy for Spark cluster.
+Mist provides a new functional programming framework and deployment model for Spark applications. 
+
+Please see our [quick start guide](https://hydrosphere.io/mist-docs/quick_start.html) and [documentation](https://hydrosphere.io/mist-docs/)
+
+Features:
+* **Spark Function as a Service**. Deploy Spark functions rather than notebooks or scripts.
+* Spark Cluster and Session management. Fully managed Spark sessions backed by on-demand EMR, Hortonworks, Cloudera, DC/OS and vanilla Spark clusters.
+* **Typesafe** programming framework that clearly defines inputs and outputs of every Spark job.
 * **REST** HTTP & Messaging (MQTT, Kafka) API for Scala & Python Spark jobs.
-* Compatibility with EMR, Hortonworks, Cloudera, DC/OS and vanilla Spark distributions.
-* Spark **MLLib serving** that has been moved to [spark-ml-serving](https://github.com/Hydrospheredata/spark-ml-serving) library and [hydro-serving](https://github.com/Hydrospheredata/hydro-serving) project
-
-It implements Spark Compute as a Service and creates a unified API layer for building enterprise solutions and services on top of a big data stack.
-
-![Mist use cases](http://hydrosphere.io/wp-content/uploads/2016/06/Mist-scheme-1050x576.png)
-
-Discover more [Hydrosphere Mist use cases](/docs/use-cases/README.md).
-
------------------
-
-**[Getting Started Guide and user documentation](/docs/README.md)**
-
------------------
-
-## More Features
-
-- Spark Contexts orchestration - Cluster of Spark Clusters: manages multiple Spark contexts in separate JVMs or Dockers
+* Multi-cluster mode: Seamless Spark cluster on-demand provisioning, autoscaling and termination(**pending**)
 ![Cluster of Spark Clusters](http://dv9c7babquml0.cloudfront.net/docs-images/mist-cluster-of-spark-clusters.gif)
-- Realtime low latency serving/scoring for ML Lib models. Moved to [spark-ml-serving](https://github.com/Hydrospheredata/spark-ml-serving) library and [hydro-serving](https://github.com/Hydrospheredata/hydro-serving) project
-![Mist Local Serving](http://dv9c7babquml0.cloudfront.net/docs-images/mist-model-serving.jpg)
-- Clear end-user REST API
-```javascript
-    POST v2/api/endpoints/weather-forecast?force=true
-    {
-        lat: “37.777114”,
-        long: “-122.419631”
-        radius: 100
-    }
-```
-- Spark **2.1.1** support! 
-- Scala and **Python** Spark jobs support
-- Support for Spark SQL and Hive
-- High Availability and Fault Tolerance
-- Self Healing after driver program failure
-- Powerful logging
 
-## Version Information
+It creates a unified API layer for building enterprise solutions and microservices on top of a Spark functions.
 
-| Mist Version   | Scala Version  | Python Version | Spark Version    |
-|----------------|----------------|----------------|------------------|
-| 0.1.4          | 2.10.6         | 2.7.6          | >=1.5.2          |
-| 0.2.0          | 2.10.6         | 2.7.6          | >=1.5.2          |
-| 0.3.0          | 2.10.6         | 2.7.6          | >=1.5.2          |
-| 0.4.0          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.5.0          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.6.5          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.7.0          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.8.0          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.9.1          | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| 0.10.0         | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
-| master         | 2.10.6, 2.11.8 | 2.7.6          | >=1.5.2          |
+![Mist use cases](http://dv9c7babquml0.cloudfront.net/docs-images/mist-use-case.png)
 
+## High Level Architecture
 
-## Roadmap
-
------------------
-- [x] Persist job state for self healing
-- [x] Super parallel mode: run Spark contexts in separate JVMs
-- [x] Powerful logging
-- [x] RESTification
-- [x] Support streaming contexts/jobs
-- [x] Reactive API
-- [x] Realtime ML models serving/scoring
-- [x] CLI
-- [x] Web Interface
-- [x] Apache Kafka support
-- [ ] AWS ECS cloudformation package 
-- [ ] AWS EMR cloudformation package
-- [ ] Hortonworks Ambari package
-- [ ] Kerberos integration
-- [ ] DC/OS package
-- [ ] Dynamic auto-configurable Spark settings based on jobs history
-- [ ] Bi-directional streaming API
-- [ ] Spark Structural Streaming API
-- [ ] AMQP support
-
+![High Level Architecture](http://dv9c7babquml0.cloudfront.net/docs-images/mist-highlevel-architecture.png)
 
 ## Contact
 
@@ -99,4 +39,3 @@ Please report bugs/problems to:
 [Facebook](https://www.facebook.com/hydrosphere.io/)
 
 [Twitter](https://twitter.com/hydrospheredata)
-
